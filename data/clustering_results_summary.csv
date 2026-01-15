@@ -1,0 +1,5 @@
+Setting,Algorithm,Silhouette Score,Davies-Bouldin Index
+Setting 4,K-Means,0.9282,0.3874
+Setting 3,K-Means,0.8862,0.5228
+Setting 2,K-Means,0.7748,0.6219
+Setting 1,K-Means,0.3775,0.9323
