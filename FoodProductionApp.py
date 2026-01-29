@@ -1,624 +1,1049 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.io import loadmat
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
-from sklearn.metrics import mean_squared_error, r2_score, classification_report, confusion_matrix, accuracy_score
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression
-from sklearn.neighbors import KNeighborsClassifier
-import joblib
-import os
+import json
 import plotly.express as px
 import plotly.graph_objects as go
+import joblib
+from pathlib import Path
+from io import BytesIO
 
-# -----------------------------
-# Page + Theme
-# -----------------------------
-st.set_page_config(page_title="Water Quality Dashboard", page_icon="💧", layout="wide")
+# ============================================================
+# IMPORTANT (requirements.txt)
+# ------------------------------------------------------------
+# streamlit-plotly-events is optional now (map click kept but
+# sidebar selection is the source of truth).
+#
+# Add to requirements.txt:
+#   streamlit==<your_version>
+#   pandas
+#   numpy
+#   plotly
+#   scikit-learn
+#   joblib
+#   pycountry
+#   streamlit-plotly-events   (optional)
+# ============================================================
+try:
+    from streamlit_plotly_events import plotly_events
+    HAS_PLOTLY_EVENTS = True
+except Exception:
+    HAS_PLOTLY_EVENTS = False
 
-def set_app_style():
-    st.markdown(
-        """
-        <style>
-          :root{
-            --bg: #0B0F17;
-            --panel: rgba(255,255,255,0.04);
-            --panel2: rgba(255,255,255,0.06);
-            --text: rgba(255,255,255,0.92);
-            --muted: rgba(255,255,255,0.65);
-            --accent: #7DF9FF;
-          }
-          html, body, [class*="css"]  { color: var(--text); }
-          .stApp { background: radial-gradient(900px 500px at 15% 10%, rgba(125,249,255,0.08), transparent 50%),
-                           radial-gradient(900px 500px at 85% 0%, rgba(179,136,255,0.10), transparent 50%),
-                           var(--bg); }
-          .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px; }
-          h1,h2,h3 { letter-spacing: -0.02em; }
-          .small-note { color: var(--muted); font-size: 0.9rem; }
-          .chip { display:inline-block; padding:6px 10px; border-radius:999px; background: var(--panel); border: 1px solid rgba(255,255,255,0.08); margin-right:8px; color: var(--muted); }
-          div[data-testid="stMetric"] {
-            background: var(--panel);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 16px;
-            padding: 14px;
-          }
-          section[data-testid="stSidebar"]{
-            background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
-            border-right: 1px solid rgba(255,255,255,0.06);
-          }
-          .stTabs [data-baseweb="tab"]{
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 999px;
-            padding: 10px 14px;
-            margin-right: 8px;
-          }
-          .stTabs [aria-selected="true"]{
-            border-color: rgba(125,249,255,0.35);
-            box-shadow: 0 0 0 2px rgba(125,249,255,0.08) inset;
-          }
-          .panel {
-            background: var(--panel);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 16px;
-            padding: 14px;
-          }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+# NEW: training utilities
+from sklearn.ensemble import RandomForestRegressor
 
-set_app_style()
+# =========================
+# Page config
+# =========================
+st.set_page_config(
+    page_title="Climate–Emissions–Agriculture Decision Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# -----------------------------
-# Data Loading
-# -----------------------------
-@st.cache_data
-def load_data(mat_path):
-    if not os.path.exists(mat_path):
-        st.error(f"Error: {mat_path} not found. Please upload it in the same folder.")
-        st.stop()
+BASE = Path(__file__).parent
+DATA = BASE / "data"
+MODELS = BASE / "models"
+ASSETS = BASE / "assets"
 
-    data = loadmat(mat_path)
-    X_tr, Y_tr = data["X_tr"], data["Y_tr"]
-    X_te, Y_te = data["X_te"], data["Y_te"]
+MASTER_PATH = DATA / "Master_Fused_Dataset_2000_2013.csv"
+MODEL_PATH = MODELS / "best_food_model.pkl"
+FEATS_PATH = MODELS / "model_features.json"
 
-    Xtr = np.stack([X_tr[0, t] for t in range(X_tr.shape[1])], axis=0)
-    Xte = np.stack([X_te[0, t] for t in range(X_te.shape[1])], axis=0)
-    Ytr = Y_tr.T
-    Yte = Y_te.T
-
-    # Standardization (z-score) using train stats
-    mu = Xtr.mean(axis=(0, 1), keepdims=True)
-    std = Xtr.std(axis=(0, 1), keepdims=True) + 1e-8
-    Xtr_s = (Xtr - mu) / std
-    Xte_s = (Xte - mu) / std
-
-    L, F = 37, 11
-    feature_cols = [f"L{l+1}_F{f+1}" for l in range(L) for f in range(F)]
-    target_cols = [f"L{l+1}_pH" for l in range(L)]
-
-    train_df = pd.concat([
-        pd.DataFrame(Xtr_s.reshape(Xtr_s.shape[0], -1), columns=feature_cols),
-        pd.DataFrame(Ytr, columns=target_cols)
-    ], axis=1)
-
-    test_df = pd.concat([
-        pd.DataFrame(Xte_s.reshape(Xte_s.shape[0], -1), columns=feature_cols),
-        pd.DataFrame(Yte, columns=target_cols)
-    ], axis=1)
-
-    return train_df, test_df, feature_cols, target_cols
-
-# -----------------------------
-# Label function
-# -----------------------------
-def ph_to_class_ui(ph, th0, th1):
-    if ph < th0:
-        return 0
-    elif ph <= th1:
-        return 1
-    else:
-        return 2
-
-# -----------------------------
-# Models
-# -----------------------------
-@st.cache_resource
-def train_classification_models(X_train, y_train, X_test, y_test):
-    models = {
-        "Random Forest": RandomForestClassifier(n_estimators=250, random_state=42),
-        "SVM (RBF)": SVC(kernel="rbf", C=10, gamma="scale", random_state=42),
-        "Logistic Regression": LogisticRegression(max_iter=1200, random_state=42),
-        "KNN": KNeighborsClassifier(n_neighbors=7),
+# =========================
+# Styling (glass / neon-ish)
+# =========================
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: radial-gradient(1200px 800px at 30% 10%, rgba(40,120,255,0.25), rgba(0,0,0,0) 60%),
+                    radial-gradient(1200px 800px at 80% 20%, rgba(0,255,180,0.18), rgba(0,0,0,0) 55%),
+                    linear-gradient(180deg, #070A12 0%, #05060A 100%);
+        color: #EAF2FF;
     }
 
-    reports, predictions, trained = {}, {}, {}
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        reports[name] = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-        predictions[name] = y_pred
-        trained[name] = model
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
 
-    return reports, predictions, trained
+    .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
 
-@st.cache_resource
-def load_ts_model(model_path):
-    if not os.path.exists(model_path):
-        st.error(f"Error: {model_path} not found. Please ensure the model exists.")
-        st.stop()
-    return joblib.load(model_path)
+    h1, h2, h3 {letter-spacing: 0.2px;}
+    h1 {font-weight: 800;}
+    h2 {font-weight: 750;}
+    h3 {font-weight: 700;}
 
-def build_performance_df(classification_reports):
-    rows = []
-    for model_name, report in classification_reports.items():
-        for cls in ["0", "1", "2"]:
-            if cls in report:
-                rows.append({
-                    "Model": model_name,
-                    "Class": int(cls),
-                    "Precision": report[cls]["precision"],
-                    "Recall": report[cls]["recall"],
-                    "F1": report[cls]["f1-score"],
-                    "Support": report[cls]["support"],
-                })
-        rows.append({
-            "Model": model_name,
-            "Class": "Overall",
-            "Precision": report["macro avg"]["precision"],
-            "Recall": report["macro avg"]["recall"],
-            "F1": report["macro avg"]["f1-score"],
-            "Accuracy": report.get("accuracy", np.nan),
-        })
-    return pd.DataFrame(rows)
+    .glass {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 18px;
+        padding: 16px 16px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+    }
 
-# -----------------------------
-# Country Heatmap (fixed scale + highlight only)
-# -----------------------------
-def make_country_heatmap_fixed(selected_country: str):
-    """
-    Heatmap remains fixed (same colors/scale).
-    Only adds a highlight marker for the selected country.
-    """
+    [data-testid="stMetricLabel"] {opacity: 0.9;}
+    [data-testid="stMetricValue"] {font-weight: 900;}
 
-    # Example fixed “risk index” per country (replace with your real mapping if you have it)
-    # Keeping constant range and constant color scale ensures the colors never shift.
-    countries = [
-        "Malaysia","Singapore","Thailand","Indonesia","Philippines","Vietnam",
-        "Japan","South Korea","China","India","Australia","United States","United Kingdom"
-    ]
-    # Fixed values (demo). Replace with your real country values if available.
-    risk = np.array([0.62, 0.66, 0.61, 0.64, 0.63, 0.60, 0.68, 0.67, 0.65, 0.59, 0.62, 0.66, 0.64])
+    section[data-testid="stSidebar"] {
+        background: rgba(255,255,255,0.04);
+        border-right: 1px solid rgba(255,255,255,0.08);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    df = pd.DataFrame({"country": countries, "risk": risk})
+# =========================
+# Helpers
+# =========================
+@st.cache_data
+def load_csv(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path)
 
-    fig = px.choropleth(
-        df,
-        locations="country",
-        locationmode="country names",
-        color="risk",
-        color_continuous_scale="Turbo",  # futuristic vibe
-        range_color=(0.55, 0.70),        # FIXED SCALE => colors stay as-is
-    )
-    fig.update_geos(
-        projection_type="natural earth",
-        showcountries=True,
-        showcoastlines=False,
-        showland=True,
-        landcolor="rgba(255,255,255,0.02)",
-        bgcolor="rgba(0,0,0,0)"
-    )
+def safe_load_model(path: Path):
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        st.error(
+            f"❌ Could not load model: {path.name}\n\n"
+            f"Error: {e}\n\n"
+            "Likely NumPy/sklearn mismatch. Fix by pinning versions in requirements.txt "
+            "to match Colab, or re-save the model after upgrading libraries."
+        )
+        return None
+
+def plotly_dark(fig):
+    fig.update_layout(template="plotly_dark")
     fig.update_layout(
-        height=420,
-        margin=dict(l=10, r=10, t=40, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        coloraxis_colorbar=dict(title="Index", tickformat=".2f")
-    )
-
-    # Highlight selected country WITHOUT changing heatmap colors
-    if selected_country:
-        fig.add_trace(
-            go.Scattergeo(
-                locations=[selected_country],
-                locationmode="country names",
-                mode="markers",
-                marker=dict(size=10, symbol="circle-open", line=dict(width=2)),
-                name="Selected"
-            )
+        margin=dict(l=10, r=10, t=60, b=10),
+        font=dict(color="#EAF2FF"),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            bordercolor="rgba(255,255,255,0.12)",
+            borderwidth=1
         )
-
+    )
     return fig
 
-# -----------------------------
-# Year mapping helper
-# -----------------------------
-def index_to_year_series(n, start_year=2000, end_year=2013):
+def ensure_temp_category(df: pd.DataFrame) -> pd.DataFrame:
+    # If Temp_Category missing, derive from Avg_Temp bins:
+    # <10 Cold, 10-20 Moderate, >20 Hot
+    if "Temp_Category" not in df.columns and "Avg_Temp" in df.columns:
+        def cat(t):
+            if pd.isna(t):
+                return np.nan
+            if t < 10:
+                return "Cold"
+            if t <= 20:
+                return "Moderate"
+            return "Hot"
+        df = df.copy()
+        df["Temp_Category"] = df["Avg_Temp"].apply(cat)
+    return df
+
+def to_iso3_series(country_series: pd.Series) -> pd.Series:
     """
-    Map sample indices to years (evenly). Useful when dataset has no real timestamps.
+    Robust Country -> ISO3 mapping.
+    We FORCE ISO3 on the map to prevent wrong hover/country mismatches.
+    Any unmapped countries are dropped from the map_df (but still exist in dataset).
     """
-    years = np.linspace(start_year, end_year, n)
-    return years.round().astype(int)
+    try:
+        import pycountry
+    except Exception:
+        # If pycountry not installed, return NaNs so we can warn clearly
+        return pd.Series([np.nan] * len(country_series), index=country_series.index)
 
-# -----------------------------
-# Main App
-# -----------------------------
-def main():
-    st.title("💧 Water Quality Analysis Dashboard")
-    st.markdown('<div class="small-note">Futuristic minimal UI • Interactive visuals • Training + XAI sections</div>', unsafe_allow_html=True)
+    manual = {
+        "United States": "USA",
+        "USA": "USA",
+        "United States of America": "USA",
+        "UK": "GBR",
+        "United Kingdom": "GBR",
+        "Russia": "RUS",
+        "Iran": "IRN",
+        "Syria": "SYR",
+        "Venezuela": "VEN",
+        "Bolivia": "BOL",
+        "Tanzania": "TZA",
+        "Viet Nam": "VNM",
+        "Vietnam": "VNM",
+        "Lao PDR": "LAO",
+        "Laos": "LAO",
+        "Moldova": "MDA",
+        "Czechia": "CZE",
+        "Czech Republic": "CZE",
+        "Myanmar": "MMR",
+        "Brunei": "BRN",
+        "South Korea": "KOR",
+        "Korea, Rep.": "KOR",
+        "North Korea": "PRK",
+        "Korea, Dem. Rep.": "PRK",
 
-    # ---------------- Sidebar ----------------
-    with st.sidebar:
-        st.header("Controls")
-        dataset_path = st.text_input("Dataset (.mat) path", "water_dataset.mat")
-        model_path = st.text_input("Time-series model (.pkl) path", "gbr_model.pkl")
+        # Congo variants
+        "Congo": "COG",
+        "Republic of the Congo": "COG",
+        "Congo, Rep.": "COG",
+        "Democratic Republic of the Congo": "COD",
+        "Congo, Dem. Rep.": "COD",
+        "DR Congo": "COD",
+        "D.R. Congo": "COD",
 
-        st.divider()
-        st.subheader("Geo View")
-        selected_country = st.selectbox(
-            "Select Country",
-            ["Malaysia","Singapore","Thailand","Indonesia","Philippines","Vietnam","Japan","South Korea","China","India","Australia","United States","United Kingdom"],
-            index=0
+        # Ivory Coast variants
+        "Ivory Coast": "CIV",
+        "Côte d’Ivoire": "CIV",
+        "Côte d'Ivoire": "CIV",
+        "Cote d'Ivoire": "CIV",
+
+        # Palestine variants
+        "Palestine": "PSE",
+        "State of Palestine": "PSE",
+    }
+
+    def norm(s: str) -> str:
+        return str(s).strip()
+
+    def lookup(name: str):
+        if pd.isna(name):
+            return np.nan
+        n = norm(name)
+        if n in manual:
+            return manual[n]
+        try:
+            c = pycountry.countries.lookup(n)
+            return c.alpha_3
+        except Exception:
+            return np.nan
+
+    return country_series.apply(lookup)
+
+def compute_forecast_features_by_trend(cdf: pd.DataFrame, year_col: str, feature_cols: list, future_years: list) -> pd.DataFrame:
+    """
+    Forecast each feature using a simple linear trend vs year (per country).
+    This is only to extend beyond 2013 when future feature data doesn't exist.
+    """
+    out_rows = []
+    cdf = cdf.dropna(subset=[year_col]).copy()
+    cdf[year_col] = pd.to_numeric(cdf[year_col], errors="coerce")
+
+    for y in future_years:
+        row = {year_col: int(y)}
+        for f in feature_cols:
+            if f not in cdf.columns:
+                row[f] = np.nan
+                continue
+
+            series = cdf[[year_col, f]].dropna()
+            if len(series) < 3:
+                last_val = cdf[f].dropna().iloc[-1] if cdf[f].dropna().shape[0] else np.nan
+                row[f] = float(last_val) if pd.notna(last_val) else np.nan
+                continue
+
+            x = series[year_col].values.astype(float)
+            v = series[f].values.astype(float)
+
+            try:
+                m, b = np.polyfit(x, v, 1)
+                row[f] = float(m * float(y) + b)
+            except Exception:
+                row[f] = float(series[f].iloc[-1])
+        out_rows.append(row)
+
+    return pd.DataFrame(out_rows)
+
+def metrics_regression(y_true, y_pred):
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+
+    if len(y_true) == 0:
+        return {"MAE": np.nan, "RMSE": np.nan, "MAPE_%": np.nan, "R2": np.nan}
+
+    mae = np.mean(np.abs(y_true - y_pred))
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+    denom = np.where(np.abs(y_true) < 1e-9, np.nan, np.abs(y_true))
+    mape = np.nanmean(np.abs((y_true - y_pred) / denom)) * 100
+
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
+
+    return {"MAE": mae, "RMSE": rmse, "MAPE_%": mape, "R2": r2}
+
+# =========================
+# Load data
+# =========================
+if not MASTER_PATH.exists():
+    st.error(f"❌ Missing dataset file: {MASTER_PATH}")
+    st.stop()
+
+df = load_csv(MASTER_PATH)
+df = ensure_temp_category(df)
+
+country_col = "Country" if "Country" in df.columns else None
+year_col = "Year" if "Year" in df.columns else None
+
+if country_col is None or year_col is None:
+    st.error("Dataset must contain 'Country' and 'Year' columns.")
+    st.stop()
+
+df[year_col] = pd.to_numeric(df[year_col], errors="coerce").astype("Int64")
+
+# =========================
+# Session state
+# =========================
+if "selected_country" not in st.session_state:
+    st.session_state.selected_country = None
+if "selected_year" not in st.session_state:
+    st.session_state.selected_year = int(df[year_col].dropna().min())
+
+# NEW: training session state
+if "trained_model" not in st.session_state:
+    st.session_state.trained_model = None
+if "trained_feats" not in st.session_state:
+    st.session_state.trained_feats = None
+
+# =========================
+# Header
+# =========================
+st.markdown(
+    """
+    <div class="glass">
+      <h1>🌍 Climate–Emissions–Agriculture Decision Dashboard</h1>
+      <div style="opacity:0.9; font-size: 0.98rem;">
+        Global heatmap → choose country (sidebar) → drilldown analytics → actual vs predicted forecasting + XAI + retraining.
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.write("")
+
+# =========================
+# Sidebar
+# =========================
+st.sidebar.header("Controls")
+
+miny = int(df[year_col].dropna().min())
+maxy = int(df[year_col].dropna().max())
+
+# NOTE: keep selected_year valid
+if st.session_state.selected_year < miny:
+    st.session_state.selected_year = miny
+if st.session_state.selected_year > maxy:
+    st.session_state.selected_year = maxy
+
+yr = st.sidebar.slider("Year (map snapshot)", miny, maxy, int(st.session_state.selected_year))
+st.session_state.selected_year = int(yr)
+
+st.sidebar.markdown("---")
+
+# NEW: accurate sidebar country selection
+all_countries = sorted(df[country_col].dropna().unique().tolist())
+if not all_countries:
+    st.error("No countries found in dataset.")
+    st.stop()
+
+default_idx = 0
+if st.session_state.selected_country in all_countries:
+    default_idx = all_countries.index(st.session_state.selected_country)
+else:
+    default_idx = 0
+    st.session_state.selected_country = all_countries[0]
+
+picked = st.sidebar.selectbox("Country (accurate selection)", all_countries, index=default_idx)
+st.session_state.selected_country = picked
+
+st.sidebar.markdown("---")
+
+# NEW: dataset explanation
+with st.sidebar.expander("📚 Datasets Used (What & Why)", expanded=False):
+    st.markdown(
+        """
+**1) Crop Yield / Food Production Dataset (Target)**  
+- **Purpose:** Main output variable: **Food_Production_Tonnes** (what we predict).  
+- **Why important:** Supports food security decisions like import/export planning, stock planning, and subsidy targeting.
+
+**2) Emissions Dataset (Key Predictors)**  
+- **Purpose:** GHG indicators (**CO₂, methane, nitrous oxide, total GHG**) + engineered features like **Carbon Intensity Index**.  
+- **Why important:** Strong drivers for prediction; Random Forest captures non-linear relationships between emissions and production.
+
+**3) Climate / Temperature Dataset (Context + Secondary Signal)**  
+- **Purpose:** Adds **Avg_Temp** and derived **Temp_Category** (Cold/Moderate/Hot).  
+- **Why important:** Useful for interpretation and context; less critical than emissions + yield for core regression accuracy in our results.
+
+**Fusion (data mining step):**  
+We align by **Country + Year** and join into one master dataset, ensuring temporal consistency for forecasting.
+        """
+    )
+
+st.sidebar.caption("Map stays as heatmap. Country selection uses sidebar to avoid hover/click mismatches.")
+
+# =========================
+# Snapshot (chosen year)
+# =========================
+df_year = df[df[year_col] == st.session_state.selected_year].copy()
+
+def safe_mean(col):
+    return float(df_year[col].mean()) if col in df_year.columns else np.nan
+
+def safe_sum(col):
+    return float(df_year[col].sum()) if col in df_year.columns else np.nan
+
+kpi_cols = st.columns(4)
+with kpi_cols[0]:
+    st.metric("Countries (year)", f"{df_year[country_col].nunique():,}")
+with kpi_cols[1]:
+    st.metric("Avg Temp (mean)", f"{safe_mean('Avg_Temp'):.2f} °C" if "Avg_Temp" in df_year.columns else "N/A")
+with kpi_cols[2]:
+    st.metric("Total GHG (sum)", f"{safe_sum('total_ghg'):,.2f}" if "total_ghg" in df_year.columns else "N/A")
+with kpi_cols[3]:
+    st.metric("Food Production (sum)", f"{safe_sum('Food_Production_Tonnes'):,.0f}" if "Food_Production_Tonnes" in df_year.columns else "N/A")
+
+st.write("")
+
+# =========================
+# Tabs
+# =========================
+tabs = st.tabs([
+    "🗺️ Global Heatmap",
+    "📈 Country Detail (Trends + Scatter + Correlation)",
+    "🤖 Prediction (Actual vs Predicted + Year Range)",
+    "🧠 Explainable AI (XAI)",
+    "🛠️ Train / Retrain Model"
+])
+
+# ============================================================
+# TAB 1: Global Heatmap (FORCE ISO3 -> fixes wrong hover names)
+# ============================================================
+with tabs[0]:
+    st.markdown('<div class="glass"><h2>🗺️ Global Temperature Category Heatmap</h2></div>', unsafe_allow_html=True)
+    st.write("")
+
+    # Build map df: one row per country for selected year
+    map_df = df_year.dropna(subset=[country_col]).copy()
+
+    # Aggregate numeric columns by mean
+    numeric_cols = map_df.select_dtypes(include="number").columns.tolist()
+    agg_dict = {c: "mean" for c in numeric_cols if c != year_col}
+    map_df = map_df.groupby(country_col, as_index=False).agg(agg_dict)
+
+    # Ensure temperature category after aggregation
+    map_df = ensure_temp_category(map_df)
+
+    # FORCE ISO3 mapping to prevent Plotly guessing wrong country shapes
+    map_df["ISO3"] = to_iso3_series(map_df[country_col])
+
+    # Show unmapped countries (won't appear in map)
+    bad = map_df["ISO3"].isna()
+    if bad.any():
+        with st.expander("⚠️ Unmapped countries (not shown on map)", expanded=False):
+            st.write(sorted(map_df.loc[bad, country_col].astype(str).unique().tolist()))
+
+    map_df = map_df.loc[~bad].copy()
+
+    if map_df.empty:
+        st.error("Map cannot render: no countries could be mapped to ISO3. Install pycountry or fix country names.")
+        st.stop()
+
+    # Color map fixed to Temp_Category
+    color_map = {"Cold": "#3B82F6", "Moderate": "#22C55E", "Hot": "#F97316"}
+
+    # Prepare customdata for hover
+    custom_cols = [country_col, "Temp_Category", "Avg_Temp", "total_ghg", "Food_Production_Tonnes", "ISO3"]
+    for c in custom_cols:
+        if c not in map_df.columns:
+            map_df[c] = np.nan
+    map_df["customdata"] = list(map_df[custom_cols].itertuples(index=False, name=None))
+
+    # Always plot using ISO3
+    loc_col = "ISO3"
+    loc_mode = "ISO-3"
+
+    fig_map = px.choropleth(
+        map_df,
+        locations=loc_col,
+        locationmode=loc_mode,
+        color="Temp_Category",
+        hover_name=country_col,
+        title=f"Temperature Category — {st.session_state.selected_year}",
+        color_discrete_map=color_map
+    )
+
+    hover_lines = []
+    i = custom_cols.index(country_col); hover_lines.append(f"<b>%{{customdata[{i}]}}</b>")
+    i = custom_cols.index("ISO3"); hover_lines.append(f"ISO3: %{{customdata[{i}]}}")
+    i = custom_cols.index("Temp_Category"); hover_lines.append(f"Temp_Category: %{{customdata[{i}]}}")
+    i = custom_cols.index("Avg_Temp"); hover_lines.append(f"Avg_Temp: %{{customdata[{i}]:.2f}} °C")
+    i = custom_cols.index("total_ghg"); hover_lines.append(f"total_ghg: %{{customdata[{i}]:.2f}}")
+    i = custom_cols.index("Food_Production_Tonnes"); hover_lines.append(f"Food_Production_Tonnes: %{{customdata[{i}]:,.0f}}")
+
+    fig_map.update_traces(
+        customdata=np.array(map_df["customdata"].tolist(), dtype=object),
+        hovertemplate="<br>".join(hover_lines) + "<extra></extra>"
+    )
+
+    # Keep map stable (no drag/zoom)
+    fig_map.update_layout(height=640, dragmode=False, uirevision="fixed_map")
+    fig_map.update_geos(
+        showcountries=True,
+        countrycolor="rgba(255,255,255,0.25)",
+        showcoastlines=False,
+        showframe=False,
+        bgcolor="rgba(0,0,0,0)"
+    )
+    fig_map = plotly_dark(fig_map)
+
+    plotly_config = {"scrollZoom": False, "displayModeBar": False, "doubleClick": False, "staticPlot": False}
+
+    # IMPORTANT FIX:
+    # - Always render the figure.
+    # - If plotly_events exists, use it to capture click events.
+    if HAS_PLOTLY_EVENTS:
+        selected_points = plotly_events(
+            fig_map,
+            click_event=True,
+            hover_event=False,
+            select_event=False,
+            override_height=640,
+            override_width="100%",
+            key="global_map_click",
         )
 
-        st.divider()
-        st.subheader("Location + Thresholds")
-        location = st.selectbox("Select pH Location", [f"L{i}_pH" for i in range(1, 38)], index=0)
-        compare_location = st.selectbox("Compare with another location", [f"L{i}_pH" for i in range(1, 38)], index=9)
+        if selected_points:
+            ev = selected_points[0]
+            clicked_country = None
 
-        th0 = st.slider("Class 0/1 threshold", 0.50, 0.90, 0.65, 0.01)
-        th1 = st.slider("Class 1/2 threshold", 0.50, 0.90, 0.70, 0.01)
-        show_conf = st.checkbox("Show confusion matrix", True)
+            # location should be ISO3 now
+            if "location" in ev:
+                loc = ev["location"]
+                match = map_df[map_df["ISO3"] == loc]
+                if len(match):
+                    clicked_country = match.iloc[0][country_col]
 
-        st.divider()
-        st.subheader("Forecast Year Range")
-        year_start = st.slider("Start year", 1995, 2025, 2000, 1)
-        year_end = st.slider("End year", 1995, 2025, 2013, 1)
+            if clicked_country is not None:
+                st.session_state.selected_country = str(clicked_country)
+                st.success(f"Selected country (map click): **{st.session_state.selected_country}**")
+            else:
+                st.warning("Clicked point couldn’t be mapped. Use the sidebar selector.")
+    else:
+        st.plotly_chart(fig_map, use_container_width=True, config=plotly_config)
 
-    # ---------------- Load Data ----------------
-    if "train_df" not in st.session_state or st.session_state.get("dataset_path") != dataset_path:
-        with st.spinner("Loading and preprocessing data..."):
-            train_df, test_df, feature_cols, target_cols = load_data(dataset_path)
-            st.session_state.train_df = train_df
-            st.session_state.test_df = test_df
-            st.session_state.feature_cols = feature_cols
-            st.session_state.target_cols = target_cols
-            st.session_state.dataset_path = dataset_path
+    # Always show current selection
+    st.info(f"Selected country (sidebar): **{st.session_state.selected_country}**")
 
-    train_df = st.session_state.train_df
-    test_df = st.session_state.test_df
-    feature_cols = st.session_state.feature_cols
+# ============================================================
+# TAB 2: Country Detail (charts not tables)
+# ============================================================
+with tabs[1]:
+    st.markdown('<div class="glass"><h2>📈 Country Detail</h2></div>', unsafe_allow_html=True)
+    st.write("")
 
-    # Labels based on selected location + thresholds
-    label_col = f"{location}_label"
-    train_df[label_col] = train_df[location].apply(lambda x: ph_to_class_ui(x, th0, th1))
-    test_df[label_col] = test_df[location].apply(lambda x: ph_to_class_ui(x, th0, th1))
+    ctry = st.session_state.selected_country
+    cdf = df[df[country_col] == ctry].copy().sort_values(year_col)
 
-    X_train_cls = train_df[feature_cols]
-    y_train_cls = train_df[label_col]
-    X_test_cls = test_df[feature_cols]
-    y_test_cls = test_df[label_col]
+    if cdf.empty:
+        st.warning("No rows for selected country.")
+        st.stop()
 
-    # ---------------- Train baseline classification models ----------------
-    cache_key = (location, th0, th1, dataset_path)
-    if st.session_state.get("cls_cache_key") != cache_key:
-        with st.spinner("Training classification models..."):
-            reports, preds, trained = train_classification_models(X_train_cls, y_train_cls, X_test_cls, y_test_cls)
-            st.session_state.classification_reports = reports
-            st.session_state.classification_predictions = preds
-            st.session_state.trained_classification_models = trained
-            st.session_state.performance_df = build_performance_df(reports)
-            st.session_state.cls_cache_key = cache_key
+    latest = cdf.dropna(subset=[year_col]).sort_values(year_col).tail(1).iloc[0]
+    c_kpis = st.columns(4)
+    with c_kpis[0]:
+        st.metric("Country", ctry)
+    with c_kpis[1]:
+        st.metric("Temp Category", str(latest.get("Temp_Category", "N/A")))
+    with c_kpis[2]:
+        st.metric("Avg Temp (latest)", f"{float(latest['Avg_Temp']):.2f} °C" if "Avg_Temp" in cdf.columns and pd.notna(latest.get("Avg_Temp")) else "N/A")
+    with c_kpis[3]:
+        st.metric("Food Production (latest)", f"{float(latest['Food_Production_Tonnes']):,.0f}" if "Food_Production_Tonnes" in cdf.columns and pd.notna(latest.get("Food_Production_Tonnes")) else "N/A")
 
-    reports = st.session_state.classification_reports
-    preds = st.session_state.classification_predictions
-    trained_models = st.session_state.trained_classification_models
-    perf_df = st.session_state.performance_df
+    st.write("")
 
-    # ---------------- Time-series forecast (loaded model) ----------------
-    ts_key = (location, model_path, dataset_path)
-    if st.session_state.get("ts_key") != ts_key:
-        with st.spinner("Preparing time series + predicting..."):
-            ph_train = train_df[location]
-            ph_test = test_df[location]
-            full = pd.concat([ph_train, ph_test], axis=0)
-            lag1 = full.shift(1)
+    left, right = st.columns([1.25, 1])
 
-            lag1_test = lag1.iloc[ph_train.shape[0]:]
-            y_test = ph_test.iloc[1:]
-            X_test_lag = lag1_test.iloc[1:].values.reshape(-1, 1)
+    with left:
+        st.markdown('<div class="glass"><h3>Climate & Emissions Trend</h3></div>', unsafe_allow_html=True)
+        st.write("")
 
-            gbr = load_ts_model(model_path)
-            y_pred = gbr.predict(X_test_lag)
+        if "Avg_Temp" in cdf.columns:
+            fig_temp = px.line(
+                cdf,
+                x=year_col,
+                y="Avg_Temp",
+                markers=True,
+                title="Avg Temperature Over Time"
+            )
+            st.plotly_chart(plotly_dark(fig_temp), use_container_width=True)
 
-            st.session_state.y_test_ts = y_test
-            st.session_state.y_pred_ts = y_pred
-            st.session_state.ts_mse = float(mean_squared_error(y_test, y_pred))
-            st.session_state.ts_r2 = float(r2_score(y_test, y_pred))
-            st.session_state.ts_key = ts_key
+        em_cols = [c for c in ["co2", "methane", "nitrous_oxide", "total_ghg"] if c in cdf.columns]
+        if em_cols:
+            fig_em = px.line(
+                cdf,
+                x=year_col,
+                y=em_cols,
+                title="Emissions Over Time (multi-series)"
+            )
+            st.plotly_chart(plotly_dark(fig_em), use_container_width=True)
 
-    y_test_ts = st.session_state.y_test_ts
-    y_pred_ts = st.session_state.y_pred_ts
-    ts_mse = st.session_state.ts_mse
-    ts_r2 = st.session_state.ts_r2
+    with right:
+        st.markdown('<div class="glass"><h3>Production & Efficiency</h3></div>', unsafe_allow_html=True)
+        st.write("")
 
-    # ---------------- KPIs ----------------
-    overall = perf_df[perf_df["Class"] == "Overall"][["Model", "Accuracy"]].dropna()
-    best_model_row = overall.sort_values("Accuracy", ascending=False).head(1)
+        if "Food_Production_Tonnes" in cdf.columns:
+            fig_prod = px.area(
+                cdf,
+                x=year_col,
+                y="Food_Production_Tonnes",
+                title="Food Production Over Time"
+            )
+            st.plotly_chart(plotly_dark(fig_prod), use_container_width=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Country", selected_country)
-    c2.metric("Best Classifier", best_model_row["Model"].iloc[0] if not best_model_row.empty else "—")
-    c3.metric("TS MSE", f"{ts_mse:.4f}")
-    c4.metric("TS R²", f"{ts_r2:.4f}")
+        if "Carbon_Intensity_Index" in cdf.columns:
+            fig_cii = px.line(
+                cdf,
+                x=year_col,
+                y="Carbon_Intensity_Index",
+                markers=True,
+                title="Carbon Intensity Index Over Time"
+            )
+            st.plotly_chart(plotly_dark(fig_cii), use_container_width=True)
+
+    st.write("")
+
+    s1, s2 = st.columns([1.1, 0.9])
+
+    with s1:
+        st.markdown('<div class="glass"><h3>Interactive Scatter: GHG vs Production</h3></div>', unsafe_allow_html=True)
+        st.write("")
+
+        if "total_ghg" in cdf.columns and "Food_Production_Tonnes" in cdf.columns:
+            hover_cols = [year_col]
+            for cc in ["Avg_Temp", "co2", "methane", "nitrous_oxide", "Carbon_Intensity_Index"]:
+                if cc in cdf.columns:
+                    hover_cols.append(cc)
+
+            fig_scatter = px.scatter(
+                cdf,
+                x="total_ghg",
+                y="Food_Production_Tonnes",
+                color="Temp_Category" if "Temp_Category" in cdf.columns else None,
+                size="Avg_Temp" if "Avg_Temp" in cdf.columns else None,
+                hover_data=hover_cols,
+                title="GHG vs Food Production (per-year points)"
+            )
+            st.plotly_chart(plotly_dark(fig_scatter), use_container_width=True)
+        else:
+            st.info("Need 'total_ghg' and 'Food_Production_Tonnes' columns for scatter plot.")
+
+    with s2:
+        st.markdown('<div class="glass"><h3>Correlation Heatmap</h3></div>', unsafe_allow_html=True)
+        st.write("")
+
+        keep = [c for c in ["Avg_Temp", "co2", "methane", "nitrous_oxide", "total_ghg", "Carbon_Intensity_Index", "Food_Production_Tonnes"] if c in cdf.columns]
+        if len(keep) >= 3:
+            corr = cdf[keep].corr(numeric_only=True)
+            fig_corr = go.Figure(
+                data=go.Heatmap(
+                    z=corr.values,
+                    x=corr.columns,
+                    y=corr.index,
+                    hoverongaps=False
+                )
+            )
+            fig_corr.update_layout(title="Feature Correlations (Selected Country)")
+            st.plotly_chart(plotly_dark(fig_corr), use_container_width=True)
+        else:
+            st.info("Not enough numeric columns for correlation view.")
+
+# ============================================================
+# TAB 3: Prediction (Actual vs Predicted + YEAR RANGE)
+# ============================================================
+with tabs[2]:
+    st.markdown('<div class="glass"><h2>🤖 Prediction (Actual vs Predicted + Year Range)</h2></div>', unsafe_allow_html=True)
+    st.write("")
+
+    # Load features
+    if not FEATS_PATH.exists():
+        st.error("❌ model_features.json not found in models/")
+        st.stop()
+
+    feats = json.loads(FEATS_PATH.read_text())
+
+    # Prefer trained model (if any), else load saved model
+    model = st.session_state.trained_model
+    if model is None:
+        model = safe_load_model(MODEL_PATH)
+    if model is None:
+        st.stop()
+
+    target_col = "Food_Production_Tonnes"
+    if target_col not in df.columns:
+        st.error("❌ Dataset missing target column 'Food_Production_Tonnes'.")
+        st.stop()
+
+    missing_feats = [f for f in feats if f not in df.columns]
+    if missing_feats:
+        st.error(f"❌ Dataset missing model feature columns: {missing_feats}")
+        st.stop()
+
+    ctry = st.session_state.selected_country
+    cdf = df[df[country_col] == ctry].copy().sort_values(year_col)
+    cdf = cdf.dropna(subset=[year_col])
+
+    if cdf.empty:
+        st.warning("No rows for selected country.")
+        st.stop()
+
+    # NEW: year range for historical comparison
+    y_min = int(cdf[year_col].min())
+    y_max = int(cdf[year_col].max())
+    yr_range = st.slider("Year range (historical comparison)", min_value=y_min, max_value=y_max, value=(y_min, y_max))
+
+    cdf_range = cdf[(cdf[year_col] >= yr_range[0]) & (cdf[year_col] <= yr_range[1])].copy()
+
+    X_hist = cdf_range[feats].copy()
+    y_true = cdf_range[target_col].copy()
+
+    valid_mask = np.isfinite(X_hist.to_numpy()).all(axis=1) & np.isfinite(y_true.to_numpy())
+    cdf_hist = cdf_range.loc[valid_mask].copy()
+
+    if cdf_hist.empty:
+        st.warning("No fully valid rows (features+target) for actual vs predicted chart in this year range.")
+        st.stop()
+
+    X_hist = cdf_hist[feats]
+    y_true = cdf_hist[target_col]
+    y_pred = model.predict(X_hist)
+
+    m = metrics_regression(y_true, y_pred)
+
+    met_cols = st.columns(4)
+    met_cols[0].metric("MAE", f"{m['MAE']:,.2f}" if np.isfinite(m["MAE"]) else "N/A")
+    met_cols[1].metric("RMSE", f"{m['RMSE']:,.2f}" if np.isfinite(m["RMSE"]) else "N/A")
+    met_cols[2].metric("MAPE (%)", f"{m['MAPE_%']:.2f}%" if np.isfinite(m["MAPE_%"]) else "N/A")
+    met_cols[3].metric("R²", f"{m['R2']:.3f}" if np.isfinite(m["R2"]) else "N/A")
+
+    st.write("")
+
+    plot_df = pd.DataFrame({
+        "Year": cdf_hist[year_col].astype(int).values,
+        "Actual": y_true.values.astype(float),
+        "Predicted": np.array(y_pred, dtype=float),
+    }).sort_values("Year")
+
+    fig_ap = go.Figure()
+    fig_ap.add_trace(go.Scatter(
+        x=plot_df["Year"],
+        y=plot_df["Actual"],
+        mode="lines+markers",
+        name="Actual"
+    ))
+    fig_ap.add_trace(go.Scatter(
+        x=plot_df["Year"],
+        y=plot_df["Predicted"],
+        mode="lines+markers",
+        name="Predicted"
+    ))
+
+    fig_ap.update_layout(
+        title=f"Actual vs Predicted Food Production — {ctry} ({yr_range[0]}–{yr_range[1]})",
+        xaxis_title="Year",
+        yaxis_title="Food_Production_Tonnes",
+    )
+    st.plotly_chart(plotly_dark(fig_ap), use_container_width=True)
+
+    st.write("")
+
+    # Future Projection beyond 2013
+    st.markdown('<div class="glass"><h3>Future Projection (Beyond 2013)</h3></div>', unsafe_allow_html=True)
+    st.caption(
+        "You don’t have real climate/emissions inputs beyond 2013 in this dataset, "
+        "so this section estimates future features using a simple trend per feature per country, "
+        "then applies the regression model to get projected production. Use as scenario preview."
+    )
+
+    future_end = st.slider("Project until year", min_value=2013, max_value=2050, value=2030)
+    if future_end > 2013:
+        future_years = list(range(2014, int(future_end) + 1))
+        future_features = compute_forecast_features_by_trend(cdf, year_col, feats, future_years)
+
+        if future_features.empty:
+            st.info("Not enough data to build future projections.")
+        else:
+            future_pred = model.predict(future_features[feats])
+            future_plot = pd.DataFrame({
+                "Year": future_features[year_col].astype(int),
+                "Projected": np.array(future_pred, dtype=float)
+            }).sort_values("Year")
+
+            fig_f = go.Figure()
+            fig_f.add_trace(go.Scatter(
+                x=plot_df["Year"],
+                y=plot_df["Actual"],
+                mode="lines+markers",
+                name="Actual (historical)"
+            ))
+            fig_f.add_trace(go.Scatter(
+                x=plot_df["Year"],
+                y=plot_df["Predicted"],
+                mode="lines+markers",
+                name="Predicted (historical)"
+            ))
+            fig_f.add_trace(go.Scatter(
+                x=future_plot["Year"],
+                y=future_plot["Projected"],
+                mode="lines",
+                name=f"Projected ({future_plot['Year'].min()}–{future_plot['Year'].max()})",
+                line=dict(dash="dash")
+            ))
+            fig_f.update_layout(
+                title=f"Historical vs Projected Food Production — {ctry}",
+                xaxis_title="Year",
+                yaxis_title="Food_Production_Tonnes",
+            )
+            st.plotly_chart(plotly_dark(fig_f), use_container_width=True)
+
+    st.write("")
+
+    # Residuals
+    st.markdown('<div class="glass"><h3>Residuals (Actual − Predicted)</h3></div>', unsafe_allow_html=True)
+    res = plot_df.copy()
+    res["Residual"] = res["Actual"] - res["Predicted"]
+    fig_res = px.bar(res, x="Year", y="Residual", title="Residuals by Year (Positive = under-predicted)")
+    st.plotly_chart(plotly_dark(fig_res), use_container_width=True)
+
+# ============================================================
+# TAB 4: Explainable AI (XAI) — uses exact assets you showed
+# ============================================================
+with tabs[3]:
+    st.markdown('<div class="glass"><h2>🧠 Explainable AI (XAI)</h2></div>', unsafe_allow_html=True)
+    st.write("")
+
+    shap_path = ASSETS / "final_shap_beeswarm.png"
+    cluster_path = ASSETS / "cluster_visualization_final.png"
 
     st.markdown(
         """
-        <div style="margin-top:10px;">
-          <span class="chip">Fixed map colors</span>
-          <span class="chip">Country highlight only</span>
-          <span class="chip">XAI images supported</span>
-          <span class="chip">Train & save model</span>
-        </div>
+<div class="glass">
+<h3>Why XAI matters for GEO FOOD SEC</h3>
+<p style="opacity:0.92;">
+Our system is a <b>decision-support</b> tool. So we must explain <b>why</b> the model predicts a certain production value.
+Explainable AI helps policymakers trust the system and verify whether the model is using sensible drivers
+(e.g., previous-year production, emissions, carbon intensity).
+</p>
+
+<h3>What decision-makers should still know</h3>
+<ul style="opacity:0.92;">
+  <li><b>Top drivers:</b> Lag feature (previous year production) is often a dominant predictor in time-dependent food data.</li>
+  <li><b>Environmental cost:</b> Carbon Intensity and emissions can shift predictions in non-linear ways.</li>
+  <li><b>Uncertainty:</b> Natural disasters, policy changes, wars, and sudden economic shocks are not fully captured here.</li>
+</ul>
+</div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    st.divider()
+    st.write("")
 
-    # ---------------- Tabs ----------------
-    tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["Dataset", "Geo", "EDA", "Classification", "Forecasting", "Explainable AI + Training"]
+    st.markdown('<div class="glass"><h3>SHAP Beeswarm (Global Feature Impact)</h3></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="glass" style="opacity:0.92;">
+This plot summarizes how each feature contributes to predictions across all countries/years.
+Features at the top have the strongest overall effect.
+Points to the right increase predicted production; points to the left decrease it.
+Color shows whether the feature value is high or low.
+</div>
+        """,
+        unsafe_allow_html=True
     )
 
-    # ============ Dataset Tab ============
-    with tab0:
-        st.subheader("Dataset Selected + Why")
-        st.markdown(
-            """
-            <div class="panel">
-            <b>Chosen dataset:</b> UCI Water Quality Prediction-1 (MATLAB .mat format)<br><br>
-            <b>Why this dataset:</b>
-            <ul>
-              <li><b>Multi-location sensing:</b> 37 locations (L1–L37) emulate distributed IoT sampling points.</li>
-              <li><b>Multi-sensor features:</b> 11 features per location capture environmental & sensor variation.</li>
-              <li><b>Real AIoT pipeline fit:</b> preprocessing → classification (status) → forecasting (trend prediction).</li>
-              <li><b>Decision support:</b> can drive alerts, compliance checks, and operational response planning.</li>
-            </ul>
-            <b>Targets:</b> pH values per location (Lx_pH).<br>
-            <b>Inputs:</b> standardized features (Lx_F1…Lx_F11).
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    if shap_path.exists():
+        st.image(str(shap_path), use_container_width=True, caption="final_shap_beeswarm.png")
+    else:
+        st.warning("Missing asset: final_shap_beeswarm.png (put it in assets/)")
 
-        st.write("")
-        left, right = st.columns(2)
-        with left:
-            st.caption("Train sample preview")
-            st.dataframe(train_df[[location, compare_location]].head(12), use_container_width=True)
-        with right:
-            st.caption("Test sample preview")
-            st.dataframe(test_df[[location, compare_location]].head(12), use_container_width=True)
+    st.write("")
 
-    # ============ Geo Tab ============
-    with tab1:
-        st.subheader("Country Heatmap (Fixed Scale) + Highlight")
-        st.caption("The heatmap colors stay fixed. Changing country only updates the highlight.")
-        fig_map = make_country_heatmap_fixed(selected_country)
-        st.plotly_chart(fig_map, use_container_width=True)
+    st.markdown('<div class="glass"><h3>Clustering Visualization (Country Group Profiles)</h3></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="glass" style="opacity:0.92;">
+This visualization groups countries into clusters with similar emissions/climate/production profiles.
+It is mainly used for segmentation and pattern discovery (secondary insight),
+while the Random Forest regression model remains the main predictor for production in tonnes.
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
-        st.markdown(
-            """
-            <div class="panel">
-            <b>Note:</b> If you have a real country-to-value mapping (e.g., average pH risk index per country),
-            replace the demo values inside <code>make_country_heatmap_fixed()</code>. Keep <code>range_color</code>
-            fixed to ensure the colors never shift.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    if cluster_path.exists():
+        st.image(str(cluster_path), use_container_width=True, caption="cluster_visualization_final.png")
+    else:
+        st.warning("Missing asset: cluster_visualization_final.png (put it in assets/)")
 
-    # ============ EDA Tab ============
-    with tab2:
-        st.subheader("pH Distributions")
-        dist_df = pd.DataFrame({
-            "pH": pd.concat([train_df[location], train_df[compare_location]], axis=0),
-            "Location": ([location] * len(train_df)) + ([compare_location] * len(train_df))
-        })
-        fig = px.histogram(dist_df, x="pH", color="Location", nbins=35, barmode="overlay", opacity=0.6)
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10),
-                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+# ============================================================
+# TAB 5: Train / Retrain model + year split controls
+# ============================================================
+with tabs[4]:
+    st.markdown('<div class="glass"><h2>🛠️ Train / Retrain Model</h2></div>', unsafe_allow_html=True)
+    st.write("")
 
-        st.subheader("pH Trends")
-        trend_df = pd.DataFrame({
-            "t": np.arange(len(train_df)),
-            location: train_df[location].values,
-            compare_location: train_df[compare_location].values
-        })
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=trend_df["t"], y=trend_df[location], name=location))
-        fig2.add_trace(go.Scatter(x=trend_df["t"], y=trend_df[compare_location], name=compare_location))
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10),
-                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           xaxis_title="Time step", yaxis_title="pH")
-        st.plotly_chart(fig2, use_container_width=True)
+    st.markdown(
+        """
+<div class="glass">
+<h3>What this section does</h3>
+<p style="opacity:0.92;">
+This section lets you retrain a <b>Random Forest Regressor</b> directly from the fused dataset.
+You can control the <b>training year range</b> and <b>testing year range</b> so evaluation respects time (no leakage).
+When trained, the Prediction tab will automatically use the new model.
+</p>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
-        st.subheader("Class Distribution")
-        cd = train_df[label_col].value_counts().sort_index().reset_index()
-        cd.columns = ["Class", "Count"]
-        fig3 = px.bar(cd, x="Class", y="Count")
-        fig3.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10),
-                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig3, use_container_width=True)
+    if not FEATS_PATH.exists():
+        st.error("❌ model_features.json not found in models/")
+        st.stop()
 
-    # ============ Classification Tab ============
-    with tab3:
-        st.subheader("Model Performance")
-        overall_acc = perf_df[perf_df["Class"] == "Overall"][["Model", "Accuracy"]].dropna()
-        fig = px.bar(overall_acc, x="Model", y="Accuracy")
-        fig.update_layout(height=380, margin=dict(l=10, r=10, t=40, b=10),
-                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          yaxis_range=[0, 1])
-        st.plotly_chart(fig, use_container_width=True)
+    feats = json.loads(FEATS_PATH.read_text())
+    target_col = "Food_Production_Tonnes"
 
-        st.subheader("Class-wise Metrics")
-        class_metrics = perf_df[perf_df["Class"] != "Overall"].copy()
-        class_metrics["Class"] = class_metrics["Class"].astype(int)
-        metric = st.selectbox("Metric", ["Precision", "Recall", "F1"], index=2, key="metric_pick")
-        fig2 = px.bar(class_metrics, x="Model", y=metric, color="Class", barmode="group")
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10),
-                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           yaxis_range=[0, 1])
-        st.plotly_chart(fig2, use_container_width=True)
+    if target_col not in df.columns:
+        st.error("❌ Dataset missing target column 'Food_Production_Tonnes'.")
+        st.stop()
 
-        st.subheader("Feature Importance (Random Forest)")
-        rf = trained_models.get("Random Forest")
-        if rf and hasattr(rf, "feature_importances_"):
-            importances = rf.feature_importances_
-            topk = 12
-            idx = np.argsort(importances)[-topk:][::-1]
-            fi_df = pd.DataFrame({"Feature": np.array(feature_cols)[idx], "Importance": importances[idx]})
-            fig3 = px.bar(fi_df[::-1], x="Importance", y="Feature", orientation="h")
-            fig3.update_layout(height=460, margin=dict(l=10, r=10, t=40, b=10),
-                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig3, use_container_width=True)
+    missing_feats = [f for f in feats if f not in df.columns]
+    if missing_feats:
+        st.error(f"❌ Dataset missing model feature columns: {missing_feats}")
+        st.stop()
+
+    global_min_year = int(df[year_col].dropna().min())
+    global_max_year = int(df[year_col].dropna().max())
+
+    st.write("")
+    st.markdown('<div class="glass"><h3>Year Split</h3></div>', unsafe_allow_html=True)
+
+    # IMPORTANT FIX:
+    # Slider defaults must be within [global_min_year, global_max_year] or Streamlit throws ValueError.
+    default_train_start = max(global_min_year, 2000)
+    default_train_end = min(global_max_year, 2012)
+    if default_train_start > default_train_end:
+        default_train_start = global_min_year
+        default_train_end = min(global_max_year, global_min_year)
+
+    default_test_start = max(global_min_year, 2013)
+    default_test_end = min(global_max_year, 2013)
+    if default_test_start > default_test_end:
+        default_test_start = global_max_year
+        default_test_end = global_max_year
+
+    train_range = st.slider(
+        "Train years",
+        min_value=global_min_year,
+        max_value=global_max_year,
+        value=(int(default_train_start), int(default_train_end))
+    )
+    test_range = st.slider(
+        "Test years",
+        min_value=global_min_year,
+        max_value=global_max_year,
+        value=(int(default_test_start), int(default_test_end))
+    )
+
+    st.write("")
+    st.markdown('<div class="glass"><h3>Random Forest Settings</h3></div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        n_estimators = st.number_input("n_estimators", min_value=50, max_value=2000, value=400, step=50)
+    with c2:
+        max_depth = st.number_input("max_depth (0 = None)", min_value=0, max_value=100, value=0, step=1)
+    with c3:
+        min_samples_leaf = st.number_input("min_samples_leaf", min_value=1, max_value=50, value=1, step=1)
+
+    train_df = df[(df[year_col] >= train_range[0]) & (df[year_col] <= train_range[1])].copy()
+    test_df = df[(df[year_col] >= test_range[0]) & (df[year_col] <= test_range[1])].copy()
+
+    needed_cols = feats + [target_col]
+    train_df = train_df.dropna(subset=needed_cols)
+    test_df = test_df.dropna(subset=needed_cols)
+
+    st.write("")
+    tcols = st.columns(3)
+    tcols[0].metric("Train rows", f"{len(train_df):,}")
+    tcols[1].metric("Test rows", f"{len(test_df):,}")
+    tcols[2].metric("Features", f"{len(feats):,}")
+
+    st.write("")
+    train_btn = st.button("🚀 Train Model", use_container_width=True)
+
+    if train_btn:
+        if len(train_df) < 50 or len(test_df) < 10:
+            st.error("Not enough rows to train/test reliably. Try widening your year ranges.")
         else:
-            st.warning("Random Forest model not available for feature importance.")
+            X_train = train_df[feats].to_numpy()
+            y_train = train_df[target_col].to_numpy(dtype=float)
 
-        if show_conf and not overall_acc.empty:
-            st.subheader("Confusion Matrix (Best Model)")
-            best = overall_acc.sort_values("Accuracy", ascending=False).iloc[0]["Model"]
-            y_pred_best = preds[best]
-            cm = confusion_matrix(y_test_cls, y_pred_best, labels=[0, 1, 2])
-            cm_df = pd.DataFrame(cm, index=["Actual 0", "Actual 1", "Actual 2"], columns=["Pred 0", "Pred 1", "Pred 2"])
-            fig4 = px.imshow(cm_df, text_auto=True, aspect="auto")
-            fig4.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10),
-                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig4, use_container_width=True)
+            X_test = test_df[feats].to_numpy()
+            y_test = test_df[target_col].to_numpy(dtype=float)
 
-    # ============ Forecasting Tab ============
-    with tab4:
-        st.subheader("Time Series Forecast (Year Range Applied)")
-
-        # Map the test index to years (synthetic timeline)
-        years = index_to_year_series(len(y_test_ts), start_year=year_start, end_year=year_end)
-        ts_df = pd.DataFrame({"Year": years, "Actual": y_test_ts.values, "Predicted": y_pred_ts})
-
-        # Apply year filter (so user can “zoom” by year)
-        min_y, max_y = min(year_start, year_end), max(year_start, year_end)
-        ts_df_f = ts_df[(ts_df["Year"] >= min_y) & (ts_df["Year"] <= max_y)]
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ts_df_f["Year"], y=ts_df_f["Actual"], name="Actual"))
-        fig.add_trace(go.Scatter(x=ts_df_f["Year"], y=ts_df_f["Predicted"], name="Predicted", line=dict(dash="dash")))
-        fig.update_layout(
-            height=460,
-            margin=dict(l=10, r=10, t=40, b=10),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="Year",
-            yaxis_title=location
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Threshold Lines (Classification Logic)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(y=train_df[location].values, x=np.arange(len(train_df)), name="pH"))
-        fig2.add_hline(y=th0, line_dash="dash", annotation_text="0/1 threshold")
-        fig2.add_hline(y=th1, line_dash="dash", annotation_text="1/2 threshold")
-        fig2.update_layout(
-            height=350,
-            margin=dict(l=10, r=10, t=40, b=10),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="Time step",
-            yaxis_title="pH"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # ============ Explainable AI + Training Tab ============
-    with tab5:
-        colA, colB = st.columns([1.1, 0.9])
-
-        with colA:
-            st.subheader("Explainable AI (XAI)")
-            st.caption("Place your XAI images inside the assets/ folder to auto-display here.")
-
-            xai_images = [
-                ("assets/shap_summary.png", "SHAP Summary Plot — shows which features push predictions up/down."),
-                ("assets/feature_importance.png", "Global Feature Importance — overall most influential sensors."),
-                ("assets/lime_example.png", "LIME Explanation — local explanation for one prediction."),
-            ]
-
-            shown_any = False
-            for path, cap in xai_images:
-                if os.path.exists(path):
-                    st.image(path, use_container_width=True, caption=cap)
-                    shown_any = True
-
-            if not shown_any:
-                st.info("No images found in /assets yet. Add your XAI plots there (png/jpg) to show them automatically.")
-
-            st.markdown(
-                """
-                <div class="panel">
-                <b>How XAI supports your project:</b>
-                <ul>
-                  <li><b>Trust:</b> shows which sensor features drive the water safety prediction.</li>
-                  <li><b>Debug:</b> detect if model relies on noisy/irrelevant sensors.</li>
-                  <li><b>Decision support:</b> helps explain alerts to stakeholders.</li>
-                </ul>
-                </div>
-                """,
-                unsafe_allow_html=True
+            rf = RandomForestRegressor(
+                n_estimators=int(n_estimators),
+                max_depth=None if int(max_depth) == 0 else int(max_depth),
+                min_samples_leaf=int(min_samples_leaf),
+                random_state=42,
+                n_jobs=-1
             )
 
-        with colB:
-            st.subheader("Train a Model (Interactive)")
-            st.caption("Train and save a classifier inside the dashboard.")
+            rf.fit(X_train, y_train)
 
-            model_choice = st.selectbox("Choose model to train", ["Random Forest", "SVM (RBF)", "Logistic Regression", "KNN"])
+            pred_test = rf.predict(X_test)
+            m = metrics_regression(y_test, pred_test)
 
-            # Minimal hyperparameters
-            if model_choice == "Random Forest":
-                n_estimators = st.slider("n_estimators", 50, 600, 250, 25)
-            elif model_choice == "KNN":
-                k = st.slider("n_neighbors", 1, 25, 7, 1)
-            elif model_choice == "SVM (RBF)":
-                C = st.slider("C", 0.1, 50.0, 10.0, 0.1)
-            else:
-                max_iter = st.slider("max_iter", 200, 3000, 1200, 100)
+            st.session_state.trained_model = rf
+            st.session_state.trained_feats = feats
 
-            train_btn = st.button("🚀 Train Now", use_container_width=True)
+            st.success("✅ Training complete. Prediction tab will now use this trained model.")
 
-            if train_btn:
-                with st.spinner("Training..."):
-                    if model_choice == "Random Forest":
-                        model = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
-                    elif model_choice == "KNN":
-                        model = KNeighborsClassifier(n_neighbors=k)
-                    elif model_choice == "SVM (RBF)":
-                        model = SVC(kernel="rbf", C=C, gamma="scale", random_state=42)
-                    else:
-                        model = LogisticRegression(max_iter=max_iter, random_state=42)
+            mc = st.columns(4)
+            mc[0].metric("MAE (test)", f"{m['MAE']:,.2f}" if np.isfinite(m["MAE"]) else "N/A")
+            mc[1].metric("RMSE (test)", f"{m['RMSE']:,.2f}" if np.isfinite(m["RMSE"]) else "N/A")
+            mc[2].metric("MAPE% (test)", f"{m['MAPE_%']:.2f}%" if np.isfinite(m["MAPE_%"]) else "N/A")
+            mc[3].metric("R² (test)", f"{m['R2']:.3f}" if np.isfinite(m["R2"]) else "N/A")
 
-                    model.fit(X_train_cls, y_train_cls)
-                    y_pred = model.predict(X_test_cls)
-                    acc = accuracy_score(y_test_cls, y_pred)
+            # Download trained model
+            buf = BytesIO()
+            joblib.dump(rf, buf)
+            buf.seek(0)
 
-                st.success(f"Training complete ✅  Accuracy: {acc:.4f}")
+            st.download_button(
+                "⬇️ Download trained model (.pkl)",
+                data=buf.getvalue(),
+                file_name="trained_food_model.pkl",
+                mime="application/octet-stream",
+                use_container_width=True
+            )
 
-                save_name = st.text_input("Save model as", value="trained_model.pkl")
-                if st.button("💾 Save Model", use_container_width=True):
-                    joblib.dump(model, save_name)
-                    st.success(f"Saved to: {save_name}")
-
-    st.divider()
-    st.caption("Futuristic minimal UI • Fixed heatmap scale • XAI section • Training + Year range forecasting")
-
-if __name__ == "__main__":
-    main()
+    st.write("")
+    st.markdown(
+        """
+<div class="glass">
+<h3>Note</h3>
+<p style="opacity:0.92;">
+If your saved Colab model was trained with different library versions, you might see loading issues.
+For best reproducibility, pin versions in requirements.txt and keep feature columns consistent.
+</p>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
