@@ -6,52 +6,57 @@ import plotly.express as px
 import plotly.graph_objects as go
 import joblib
 from pathlib import Path
-from io import BytesIO
 
 # ============================================================
-# OPTIONAL: click events (sidebar selection is source of truth)
+# Streamlit config
 # ============================================================
-try:
-    from streamlit_plotly_events import plotly_events
-    HAS_PLOTLY_EVENTS = True
-except Exception:
-    HAS_PLOTLY_EVENTS = False
-
-# NEW: training utilities
-from sklearn.ensemble import RandomForestRegressor
-
-# =========================
-# Page config
-# =========================
 st.set_page_config(
-    page_title="Climate–Emissions–Agriculture Decision Dashboard",
+    page_title="GeoFoodSec — Climate–Emissions–Food Production Dashboard",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# =========================
-# Paths
-# =========================
-BASE = Path(__file__).parent
+# ============================================================
+# Robust project root detection (FIXES missing models/images)
+# ============================================================
+def find_project_root() -> Path:
+    """
+    Streamlit Cloud / local runs sometimes change working dir.
+    This finds the first parent folder that contains our expected folders.
+    """
+    here = Path(__file__).resolve()
+    candidates = [here.parent] + list(here.parents)
+    for p in candidates:
+        if (p / "data").exists() and (p / "models").exists():
+            return p
+        if (p / "data").exists() and (p / "models").exists() and (p / "assests").exists():
+            return p
+    cwd = Path.cwd().resolve()
+    if (cwd / "data").exists() and (cwd / "models").exists():
+        return cwd
+    return here.parent
 
+
+BASE = find_project_root()
 DATA = BASE / "data"
 MODELS = BASE / "models"
 
-# IMPORTANT: some of your screenshots show a folder named "assests" by mistake.
-# We support BOTH "assets" and "assests" so images always load.
+# tolerate both assets/ and assests/
 ASSETS = BASE / "assets"
-ASSETS_ALT = BASE / "assests"
+if not ASSETS.exists():
+    ASSETS = BASE / "assests"
+if not ASSETS.exists():
+    ASSETS = Path.cwd() / "assets"
 
-# Support both CSV and XLSX (your earlier screenshots show Excel files)
 MASTER_PATH_XLSX = DATA / "Master_Fused_Dataset_2000_2013.xlsx"
 MASTER_PATH_CSV = DATA / "Master_Fused_Dataset_2000_2013.csv"
 
-MODEL_PATH = MODELS / "best_food_model.pkl"
-FEATS_PATH = MODELS / "model_features.json"
+FOOD_MODEL_PATH = MODELS / "best_food_model.pkl"
+FOOD_FEATS_PATH = MODELS / "model_features.json"
 
-# =========================
-# Styling (glass / neon-ish)
-# =========================
+# ============================================================
+# Styling
+# ============================================================
 st.markdown(
     """
     <style>
@@ -61,17 +66,13 @@ st.markdown(
                     linear-gradient(180deg, #070A12 0%, #05060A 100%);
         color: #EAF2FF;
     }
-
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-
     .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-
     h1, h2, h3 {letter-spacing: 0.2px;}
-    h1 {font-weight: 800;}
-    h2 {font-weight: 750;}
-    h3 {font-weight: 700;}
-
+    h1 {font-weight: 850;}
+    h2 {font-weight: 800;}
+    h3 {font-weight: 750;}
     .glass {
         background: rgba(255,255,255,0.06);
         border: 1px solid rgba(255,255,255,0.10);
@@ -81,22 +82,44 @@ st.markdown(
         backdrop-filter: blur(10px);
         -webkit-backdrop-filter: blur(10px);
     }
-
-    [data-testid="stMetricLabel"] {opacity: 0.9;}
-    [data-testid="stMetricValue"] {font-weight: 900;}
-
+    .chip {
+        display:inline-flex;
+        align-items:center;
+        gap:8px;
+        padding:6px 10px;
+        border-radius:999px;
+        border:1px solid rgba(255,255,255,0.16);
+        background: rgba(255,255,255,0.06);
+        margin-right:8px;
+        font-size: 0.90rem;
+        opacity: 0.95;
+    }
+    .dot {
+        width:12px;height:12px;border-radius:50%;
+        display:inline-block;
+        border:1px solid rgba(255,255,255,0.25);
+    }
     section[data-testid="stSidebar"] {
         background: rgba(255,255,255,0.04);
         border-right: 1px solid rgba(255,255,255,0.08);
+    }
+    div[data-testid="stMetricValue"] {
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        font-size: 1.7rem !important;
+        line-height: 1.15 !important;
+    }
+    thead tr th {
+        background: rgba(255,255,255,0.05) !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# =========================
+# ============================================================
 # Helpers
-# =========================
+# ============================================================
 @st.cache_data
 def load_file(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -105,24 +128,14 @@ def load_file(path: Path) -> pd.DataFrame:
         return pd.read_excel(path)
     return pd.read_csv(path)
 
+
 def get_master_path() -> Path:
     if MASTER_PATH_XLSX.exists():
         return MASTER_PATH_XLSX
     if MASTER_PATH_CSV.exists():
         return MASTER_PATH_CSV
-    return MASTER_PATH_CSV
+    return MASTER_PATH_XLSX
 
-def safe_load_model(path: Path):
-    try:
-        return joblib.load(path)
-    except Exception as e:
-        st.error(
-            f"❌ Could not load model: {path.name}\n\n"
-            f"Error: {e}\n\n"
-            "Likely NumPy/sklearn mismatch. Fix by pinning versions in requirements.txt "
-            "to match Colab, or re-save the model after upgrading libraries."
-        )
-        return None
 
 def plotly_dark(fig):
     fig.update_layout(template="plotly_dark")
@@ -139,10 +152,9 @@ def plotly_dark(fig):
     )
     return fig
 
-def ensure_temp_category(df: pd.DataFrame) -> pd.DataFrame:
-    # If Temp_Category missing, derive from Avg_Temp bins:
-    # <10 Cold, 10-20 Moderate, >20 Hot
-    if "Temp_Category" not in df.columns and "Avg_Temp" in df.columns:
+
+def ensure_temp_category(df_: pd.DataFrame) -> pd.DataFrame:
+    if "Temp_Category" not in df_.columns and "Avg_Temp" in df_.columns:
         def cat(t):
             if pd.isna(t):
                 return np.nan
@@ -151,10 +163,11 @@ def ensure_temp_category(df: pd.DataFrame) -> pd.DataFrame:
             if t <= 20:
                 return "Moderate"
             return "Hot"
-        out = df.copy()
+        out = df_.copy()
         out["Temp_Category"] = out["Avg_Temp"].apply(cat)
         return out
-    return df
+    return df_
+
 
 def try_import_pycountry():
     try:
@@ -163,72 +176,28 @@ def try_import_pycountry():
     except Exception:
         return None
 
+
 def to_iso3_series(country_series: pd.Series) -> pd.Series:
-    """
-    Robust Country -> ISO3 mapping.
-    Returns NaN for unknowns.
-    """
     pycountry = try_import_pycountry()
     if pycountry is None:
         return pd.Series([np.nan] * len(country_series), index=country_series.index)
 
     manual = {
-        "United States": "USA",
-        "USA": "USA",
-        "United States of America": "USA",
-        "UK": "GBR",
-        "United Kingdom": "GBR",
+        "United States": "USA", "USA": "USA", "United States of America": "USA",
+        "UK": "GBR", "United Kingdom": "GBR",
         "Russia": "RUS",
-        "Russian Federation": "RUS",
-
-        "Iran": "IRN",
-        "Syria": "SYR",
-        "Venezuela": "VEN",
-        "Bolivia": "BOL",
-        "Tanzania": "TZA",
-
-        "Viet Nam": "VNM",
-        "Vietnam": "VNM",
-        "Lao PDR": "LAO",
-        "Laos": "LAO",
-
-        "Moldova": "MDA",
-        "Czechia": "CZE",
-        "Czech Republic": "CZE",
-        "Myanmar": "MMR",
-        "Brunei": "BRN",
-
-        "South Korea": "KOR",
-        "Korea, Rep.": "KOR",
-        "North Korea": "PRK",
-        "Korea, Dem. Rep.": "PRK",
-
-        # Congo variants
-        "Congo": "COG",
-        "Republic of the Congo": "COG",
-        "Congo, Rep.": "COG",
-        "Democratic Republic of the Congo": "COD",
-        "Congo, Dem. Rep.": "COD",
-        "DR Congo": "COD",
-        "D.R. Congo": "COD",
-
-        # Ivory Coast variants
-        "Ivory Coast": "CIV",
-        "Côte d’Ivoire": "CIV",
-        "Côte d'Ivoire": "CIV",
-        "Cote d'Ivoire": "CIV",
-
-        # Palestine
-        "Palestine": "PSE",
-        "State of Palestine": "PSE",
-
-        # Common country display tweaks
-        "Cabo Verde": "CPV",
-        "Cape Verde": "CPV",
-        "Swaziland": "SWZ",
-        "Eswatini": "SWZ",
-        "Macedonia": "MKD",
-        "North Macedonia": "MKD",
+        "Iran": "IRN", "Syria": "SYR",
+        "Venezuela": "VEN", "Bolivia": "BOL", "Tanzania": "TZA",
+        "Viet Nam": "VNM", "Vietnam": "VNM",
+        "Lao PDR": "LAO", "Laos": "LAO",
+        "Moldova": "MDA", "Czechia": "CZE", "Czech Republic": "CZE",
+        "Myanmar": "MMR", "Brunei": "BRN",
+        "South Korea": "KOR", "Korea, Rep.": "KOR",
+        "North Korea": "PRK", "Korea, Dem. Rep.": "PRK",
+        "Congo": "COG", "Republic of the Congo": "COG", "Congo, Rep.": "COG",
+        "Democratic Republic of the Congo": "COD", "Congo, Dem. Rep.": "COD", "DR Congo": "COD", "D.R. Congo": "COD",
+        "Ivory Coast": "CIV", "Côte d’Ivoire": "CIV", "Côte d'Ivoire": "CIV", "Cote d'Ivoire": "CIV",
+        "Palestine": "PSE", "State of Palestine": "PSE",
     }
 
     def lookup(name: str):
@@ -245,98 +214,107 @@ def to_iso3_series(country_series: pd.Series) -> pd.Series:
 
     return country_series.apply(lookup)
 
+
+def metrics_regression(y_true, y_pred):
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    if len(y_true) == 0:
+        return {"MAE": np.nan, "RMSE": np.nan, "MAPE_%": np.nan, "R2": np.nan}
+    mae = np.mean(np.abs(y_true - y_pred))
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+    denom = np.where(np.abs(y_true) < 1e-9, np.nan, np.abs(y_true))
+    mape = np.nanmean(np.abs((y_true - y_pred) / denom)) * 100
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
+    return {"MAE": mae, "RMSE": rmse, "MAPE_%": mape, "R2": r2}
+
+
 def compute_forecast_features_by_trend(cdf: pd.DataFrame, year_col: str, feature_cols: list, future_years: list) -> pd.DataFrame:
-    """
-    Forecast each feature using a simple linear trend vs year (per country).
-    This is only to extend beyond dataset end year when future feature data doesn't exist.
-    """
     out_rows = []
     cdf = cdf.dropna(subset=[year_col]).copy()
     cdf[year_col] = pd.to_numeric(cdf[year_col], errors="coerce")
-
     for y in future_years:
         row = {year_col: int(y)}
         for f in feature_cols:
             if f not in cdf.columns:
                 row[f] = np.nan
                 continue
-
             series = cdf[[year_col, f]].dropna()
             if len(series) < 3:
                 last_val = cdf[f].dropna().iloc[-1] if cdf[f].dropna().shape[0] else np.nan
                 row[f] = float(last_val) if pd.notna(last_val) else np.nan
                 continue
-
             x = series[year_col].values.astype(float)
             v = series[f].values.astype(float)
-
             try:
                 m, b = np.polyfit(x, v, 1)
                 row[f] = float(m * float(y) + b)
             except Exception:
                 row[f] = float(series[f].iloc[-1])
         out_rows.append(row)
-
     return pd.DataFrame(out_rows)
 
-def metrics_regression(y_true, y_pred):
-    y_true = np.array(y_true, dtype=float)
-    y_pred = np.array(y_pred, dtype=float)
 
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true = y_true[mask]
-    y_pred = y_pred[mask]
+def year_over_year_pct(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    prev = s.shift(1)
+    pct = (s - prev) / prev.replace(0, np.nan) * 100
+    return pct
 
-    if len(y_true) == 0:
-        return {"MAE": np.nan, "RMSE": np.nan, "MAPE_%": np.nan, "R2": np.nan}
 
-    mae = np.mean(np.abs(y_true - y_pred))
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+def safe_load_model(path: Path, label: str):
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        st.error(
+            f"❌ Could not load **{label}** ({path.name}).\n\n"
+            f"Error: {e}\n\n"
+            "This usually happens when the model was saved under different NumPy / scikit-learn versions.\n"
+            "Fix: pin versions in `requirements.txt` to match the training environment, or re-save the model after upgrading."
+        )
+        return None
 
-    denom = np.where(np.abs(y_true) < 1e-9, np.nan, np.abs(y_true))
-    mape = np.nanmean(np.abs((y_true - y_pred) / denom)) * 100
 
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
-
-    return {"MAE": mae, "RMSE": rmse, "MAPE_%": mape, "R2": r2}
-
-def resolve_asset_path(filename: str) -> Path:
-    """
-    Fixes the 'XAI images not showing' problem by:
-    - supporting both assets/ and assests/
-    - trying exact filename
-    - trying common alternative names if needed
-    """
+def find_asset(filename: str) -> Path | None:
     candidates = [
         ASSETS / filename,
-        ASSETS_ALT / filename,
-        # Sometimes people accidentally prefix with "./assets/"
         BASE / filename,
+        Path.cwd() / filename,
+        Path(filename),
     ]
     for p in candidates:
         if p.exists():
             return p
-    return candidates[0]
 
-def safe_pct_change(series: pd.Series) -> pd.Series:
-    """
-    Year-over-year % change: (x_t - x_{t-1}) / x_{t-1} * 100
-    """
-    s = pd.to_numeric(series, errors="coerce")
-    prev = s.shift(1)
-    denom = prev.replace(0, np.nan)
-    return ((s - prev) / denom) * 100
+    if ASSETS.exists() and ASSETS.is_dir():
+        target = filename.lower()
+        for p in ASSETS.iterdir():
+            if p.is_file() and p.name.lower() == target:
+                return p
 
-# =========================
+    stem = Path(filename).stem.lower()
+    if ASSETS.exists() and ASSETS.is_dir():
+        for p in ASSETS.iterdir():
+            if p.is_file() and p.stem.lower() == stem:
+                return p
+
+    return None
+
+
+# ============================================================
 # Load data
-# =========================
+# ============================================================
 MASTER_PATH = get_master_path()
 if not MASTER_PATH.exists():
     st.error(
-        "❌ Missing dataset file.\n\n"
-        f"Put it inside /data as one of:\n- {MASTER_PATH_XLSX.name}\n- {MASTER_PATH_CSV.name}"
+        "❌ Missing dataset file in /data.\n"
+        f"Expected one of:\n- {MASTER_PATH_XLSX.name}\n- {MASTER_PATH_CSV.name}\n\n"
+        f"Detected BASE folder: {BASE}\n"
+        f"DATA folder exists: {DATA.exists()}\nMODELS folder exists: {MODELS.exists()}\nASSETS folder exists: {ASSETS.exists()}"
     )
     st.stop()
 
@@ -351,28 +329,28 @@ if country_col is None or year_col is None:
 
 df[year_col] = pd.to_numeric(df[year_col], errors="coerce").astype("Int64")
 
-# =========================
+# ============================================================
 # Session state
-# =========================
+# ============================================================
 if "selected_country" not in st.session_state:
     st.session_state.selected_country = None
 if "selected_year" not in st.session_state:
     st.session_state.selected_year = int(df[year_col].dropna().min())
 
-if "trained_model" not in st.session_state:
-    st.session_state.trained_model = None
-if "trained_feats" not in st.session_state:
-    st.session_state.trained_feats = None
+if "trained_food_model" not in st.session_state:
+    st.session_state.trained_food_model = None
+if "trained_food_feats" not in st.session_state:
+    st.session_state.trained_food_feats = None
 
-# =========================
+# ============================================================
 # Header
-# =========================
+# ============================================================
 st.markdown(
     """
     <div class="glass">
-      <h1>🌍 Climate–Emissions–Agriculture Decision Dashboard</h1>
+      <h1>🌍 GeoFoodSec — Decision Dashboard</h1>
       <div style="opacity:0.9; font-size: 0.98rem;">
-        Global overview → Country drilldown → Prediction (tonnes) + growth → XAI → Clustering → Retraining.
+        One view connecting <b>Climate → Emissions → Food Production</b>.
       </div>
     </div>
     """,
@@ -380,26 +358,19 @@ st.markdown(
 )
 st.write("")
 
-# =========================
+# ============================================================
 # Sidebar
-# =========================
+# ============================================================
 st.sidebar.header("Controls")
 
 miny = int(df[year_col].dropna().min())
 maxy = int(df[year_col].dropna().max())
 
-# Keep selected_year valid
-if st.session_state.selected_year < miny:
-    st.session_state.selected_year = miny
-if st.session_state.selected_year > maxy:
-    st.session_state.selected_year = maxy
-
-yr = st.sidebar.slider("Year (global snapshot)", miny, maxy, int(st.session_state.selected_year))
+yr = st.sidebar.slider("Year (global snapshot)", miny, maxy, st.session_state.selected_year)
 st.session_state.selected_year = int(yr)
 
 st.sidebar.markdown("---")
 
-# Country selection (sidebar = source of truth)
 all_countries = sorted(df[country_col].dropna().unique().tolist())
 if not all_countries:
     st.error("No countries found in dataset.")
@@ -409,40 +380,25 @@ if st.session_state.selected_country not in all_countries:
     st.session_state.selected_country = all_countries[0]
 
 picked = st.sidebar.selectbox(
-    "Country (accurate selection)",
+    "Country (for detail + forecasts)",
     all_countries,
-    index=all_countries.index(st.session_state.selected_country)
+    index=all_countries.index(st.session_state.selected_country),
 )
 st.session_state.selected_country = picked
 
 st.sidebar.markdown("---")
-
-# Dataset explanation (stakeholder-friendly)
-with st.sidebar.expander("📚 Datasets Used (What & Why)", expanded=False):
+with st.sidebar.expander("What this tool answers"):
     st.markdown(
         """
-**1) Food Production / Crop Output (Target Variable)**  
-- **What:** `Food_Production_Tonnes` (the value we predict).  
-- **Why:** Used for **food security planning** (stock buffer, import/export decisions, subsidy targeting).
-
-**2) Emissions (Main Predictors)**  
-- **What:** `co2`, `methane`, `nitrous_oxide`, `total_ghg`, plus engineered signals like `Carbon_Intensity_Index`.  
-- **Why:** Emissions relate to industrialization and environmental pressure that can affect production patterns.
-
-**3) Climate (Context + Signal)**  
-- **What:** `Avg_Temp`, and derived `Temp_Category` (Cold/Moderate/Hot).  
-- **Why:** Provides climate context that supports interpretation and policy decisions.
-
-**Fusion step:**  
-All sources are aligned by **Country + Year**, producing a unified master dataset for modelling and dashboards.
+- **Food production forecasting:** estimated tonnes by country  
+- **Drivers:** temperature + emissions + carbon intensity  
+- **Insights:** clustering-based peer groups for comparison  
         """
     )
 
-st.sidebar.caption("Tip: If map hover is unreliable, use the global table + sidebar selection (always correct).")
-
-# =========================
-# Snapshot KPIs for selected year
-# =========================
+# ============================================================
+# Snapshot KPIs
+# ============================================================
 df_year = df[df[year_col] == st.session_state.selected_year].copy()
 
 def safe_mean(col):
@@ -453,70 +409,59 @@ def safe_sum(col):
 
 kpi_cols = st.columns(4)
 with kpi_cols[0]:
-    st.metric("Countries (year)", f"{df_year[country_col].nunique():,}")
+    st.metric("Countries in snapshot", f"{df_year[country_col].nunique():,}")
 with kpi_cols[1]:
-    st.metric("Avg Temp (mean)", f"{safe_mean('Avg_Temp'):.2f} °C" if "Avg_Temp" in df_year.columns else "N/A")
+    st.metric("Average temperature", f"{safe_mean('Avg_Temp'):.2f} °C" if "Avg_Temp" in df_year.columns else "N/A")
 with kpi_cols[2]:
-    st.metric("Total GHG (sum)", f"{safe_sum('total_ghg'):,.2f}" if "total_ghg" in df_year.columns else "N/A")
+    st.metric("Total greenhouse gas (sum)", f"{safe_sum('total_ghg'):,.2f}" if "total_ghg" in df_year.columns else "N/A")
 with kpi_cols[3]:
-    st.metric("Food Production (sum)", f"{safe_sum('Food_Production_Tonnes'):,.0f}" if "Food_Production_Tonnes" in df_year.columns else "N/A")
+    st.metric("Food production (sum)", f"{safe_sum('Food_Production_Tonnes'):,.0f}" if "Food_Production_Tonnes" in df_year.columns else "N/A")
 
 st.write("")
 
 # ============================================================
-# Tabs
+# Tabs (✅ Risk module removed)
 # ============================================================
 tabs = st.tabs([
-    "🌐 Global Overview (Stable Map + Fallback)",
-    "📈 Country Detail",
-    "🤖 Prediction (Actual vs Predicted + Growth)",
-    "🧠 Explainable AI (XAI)",
+    "🌐 Global Overview",
+    "📈 Country Insights",
+    "📊 Forecast & Change",
+    "🧠 Explainability (XAI)",
+    "🛠️ Model Tuning",
     "🧩 Clustering Insight",
-    "🛠️ Train / Retrain Model"
 ])
 
 # ============================================================
-# TAB 1: Global Overview (RE-DESIGNED MAP ARCHITECTURE)
-# - Uses go.Choropleth with ISO3 + aligned arrays to stop hover mismatch
-# - If mapping is weak, fallback to ranked charts + table
+# TAB 1: Global Overview
 # ============================================================
 with tabs[0]:
     st.markdown('<div class="glass"><h2>🌐 Global Overview</h2></div>', unsafe_allow_html=True)
     st.write("")
 
-    st.markdown(
-        """
-<div class="glass" style="opacity:0.92;">
-This section is designed to be **reliable**:
-- Preferred: a stable world map using **ISO3 codes** with **aligned hover data** (prevents Russia≠Bangladesh hover bugs).
-- Fallback: if too many country names cannot be mapped to ISO3, we show **ranked charts + a sortable table**.
-</div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.write("")
-
-    metric_choices = []
-    if "Temp_Category" in df_year.columns:
-        metric_choices.append("Temp_Category")
-    for m in ["Avg_Temp", "total_ghg", "Food_Production_Tonnes", "Carbon_Intensity_Index"]:
-        if m in df_year.columns:
-            metric_choices.append(m)
-
+    metric_choices = [m for m in ["Temp_Category", "Avg_Temp", "total_ghg", "Food_Production_Tonnes"] if m in df_year.columns]
     if not metric_choices:
         st.warning("No usable global metrics found for the selected year.")
         st.stop()
 
-    chosen_metric = st.selectbox("Global view metric", metric_choices, index=0)
+    chosen_metric = st.selectbox("What to display on the world map", metric_choices, index=0)
 
-    # Prepare grouped frame: 1 row per country
+    if "Temp_Category" in metric_choices:
+        st.markdown(
+            """
+            <div style="margin-top:6px; margin-bottom: 6px;">
+              <span class="chip"><span class="dot" style="background:#3B82F6;"></span> Cold</span>
+              <span class="chip"><span class="dot" style="background:#22C55E;"></span> Moderate</span>
+              <span class="chip"><span class="dot" style="background:#F97316;"></span> Hot</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     map_df = df_year.dropna(subset=[country_col]).copy()
     numeric_cols = map_df.select_dtypes(include="number").columns.tolist()
     agg_dict = {c: "mean" for c in numeric_cols if c != year_col}
     grouped = map_df.groupby(country_col, as_index=False).agg(agg_dict)
     grouped = ensure_temp_category(grouped)
-
-    # ISO3 mapping
     grouped["ISO3"] = to_iso3_series(grouped[country_col])
 
     unmapped = grouped["ISO3"].isna().sum()
@@ -524,205 +469,143 @@ This section is designed to be **reliable**:
     unmapped_ratio = (unmapped / total) if total else 1.0
 
     pycountry_ok = try_import_pycountry() is not None
-    map_ok = pycountry_ok and total > 0 and unmapped_ratio <= 0.20  # allow up to 20% unmapped
+    map_ok = pycountry_ok and total > 0 and unmapped_ratio <= 0.20
 
-    left, right = st.columns([1.25, 0.75])
+    st.markdown('<div class="glass"><h3>World Map</h3></div>', unsafe_allow_html=True)
+    st.write("")
 
-    with left:
-        if map_ok:
-            plot_df = grouped.dropna(subset=["ISO3"]).copy()
+    if map_ok:
+        plot_df = grouped.dropna(subset=["ISO3"]).copy()
 
-            # Sort by ISO3 so locations/customdata/text are aligned
-            plot_df = plot_df.sort_values("ISO3").reset_index(drop=True)
-
-            # Build aligned arrays
-            locs = plot_df["ISO3"].astype(str).tolist()
-            names = plot_df[country_col].astype(str).tolist()
-
-            # common hover fields
-            avg_temp = plot_df["Avg_Temp"].tolist() if "Avg_Temp" in plot_df.columns else [np.nan]*len(plot_df)
-            total_ghg = plot_df["total_ghg"].tolist() if "total_ghg" in plot_df.columns else [np.nan]*len(plot_df)
-            food_t = plot_df["Food_Production_Tonnes"].tolist() if "Food_Production_Tonnes" in plot_df.columns else [np.nan]*len(plot_df)
-
-            customdata = np.array(list(zip(names, avg_temp, total_ghg, food_t)), dtype=object)
-
-            if chosen_metric == "Temp_Category":
-                # discrete coloring
-                cat = plot_df["Temp_Category"].astype(str).fillna("Unknown")
-                cat_to_num = {"Cold": 0, "Moderate": 1, "Hot": 2, "Unknown": -1}
-                z = cat.map(cat_to_num).tolist()
-
-                colorscale = [
-                    [0.0, "#3B82F6"], [0.33, "#3B82F6"],   # Cold
-                    [0.34, "#22C55E"], [0.66, "#22C55E"], # Moderate
-                    [0.67, "#F97316"], [1.0, "#F97316"],  # Hot
-                ]
-
-                # NOTE: z is only for coloring; hover shows the real category
-                # Put category as text
-                text = cat.tolist()
-
-                fig = go.Figure(data=go.Choropleth(
-                    locations=locs,
-                    locationmode="ISO-3",
-                    z=z,
-                    text=text,
-                    customdata=customdata,
-                    colorscale=colorscale,
-                    showscale=False,
-                    marker_line_color="rgba(255,255,255,0.18)",
-                    marker_line_width=0.5,
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b><br>"
-                        "ISO3: %{location}<br>"
-                        "Temp_Category: %{text}<br>"
-                        "Avg_Temp: %{customdata[1]:.2f} °C<br>"
-                        "total_ghg: %{customdata[2]:.2f}<br>"
-                        "Food_Production_Tonnes: %{customdata[3]:,.0f}"
-                        "<extra></extra>"
-                    )
-                ))
-                fig.update_layout(title=f"Temperature Category — {st.session_state.selected_year}")
-
-            else:
-                # numeric metric coloring
-                z = plot_df[chosen_metric].astype(float).tolist()
-
-                fig = go.Figure(data=go.Choropleth(
-                    locations=locs,
-                    locationmode="ISO-3",
-                    z=z,
-                    text=names,
-                    customdata=customdata,
-                    colorscale="Turbo",
-                    colorbar=dict(title=chosen_metric),
-                    marker_line_color="rgba(255,255,255,0.18)",
-                    marker_line_width=0.5,
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b><br>"
-                        "ISO3: %{location}<br>"
-                        f"{chosen_metric}: %{{z:.3f}}<br>"
-                        "Avg_Temp: %{customdata[1]:.2f} °C<br>"
-                        "total_ghg: %{customdata[2]:.2f}<br>"
-                        "Food_Production_Tonnes: %{customdata[3]:,.0f}"
-                        "<extra></extra>"
-                    )
-                ))
-                fig.update_layout(title=f"{chosen_metric} — {st.session_state.selected_year}")
-
-            fig.update_layout(height=640, dragmode=False, uirevision="fixed_map")
-            fig.update_geos(
-                showcountries=True,
-                countrycolor="rgba(255,255,255,0.25)",
-                showcoastlines=False,
-                showframe=False,
-                bgcolor="rgba(0,0,0,0)"
+        if chosen_metric == "Temp_Category":
+            color_map = {"Cold": "#3B82F6", "Moderate": "#22C55E", "Hot": "#F97316"}
+            fig = px.choropleth(
+                plot_df,
+                locations="ISO3",
+                locationmode="ISO-3",
+                color="Temp_Category",
+                hover_name=country_col,
+                title=f"Temperature Category — {st.session_state.selected_year}",
+                color_discrete_map=color_map,
             )
-            st.plotly_chart(plotly_dark(fig), use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
-
         else:
-            st.markdown('<div class="glass"><h3>Fallback View (No Map)</h3></div>', unsafe_allow_html=True)
-            st.write("")
-            why = []
-            if not pycountry_ok:
-                why.append("- `pycountry` not installed (needed for ISO3 mapping).")
-            if total == 0:
-                why.append("- No country rows found for the selected year.")
-            if unmapped_ratio > 0.20:
-                why.append(f"- Too many unmapped countries: {unmapped}/{total} (~{unmapped_ratio*100:.1f}%).")
+            fig = px.choropleth(
+                plot_df,
+                locations="ISO3",
+                locationmode="ISO-3",
+                color=chosen_metric,
+                hover_name=country_col,
+                title=f"{chosen_metric} — {st.session_state.selected_year}",
+                color_continuous_scale="Turbo",
+            )
 
-            st.warning("Map disabled to avoid wrong countries / buggy rendering.\n\n" + "\n".join(why))
-
-            if chosen_metric == "Temp_Category":
-                counts = grouped["Temp_Category"].value_counts(dropna=False).reset_index()
-                counts.columns = ["Temp_Category", "Count"]
-                figb = px.bar(counts, x="Temp_Category", y="Count", title="Temp Category Distribution")
-                st.plotly_chart(plotly_dark(figb), use_container_width=True)
-            else:
-                tmp = grouped[[country_col, chosen_metric]].dropna().sort_values(chosen_metric, ascending=False).head(25)
-                figb = px.bar(tmp, x=chosen_metric, y=country_col, orientation="h", title=f"Top 25 Countries by {chosen_metric}")
-                st.plotly_chart(plotly_dark(figb), use_container_width=True)
-
-    with right:
-        st.markdown('<div class="glass"><h3>Global Table (Always Correct)</h3></div>', unsafe_allow_html=True)
-        st.write("")
-        show_cols = [country_col]
-        for c in ["Temp_Category", "Avg_Temp", "total_ghg", "Food_Production_Tonnes", "Carbon_Intensity_Index"]:
-            if c in grouped.columns and c not in show_cols:
-                show_cols.append(c)
-
-        table_df = grouped[show_cols].copy()
-        if chosen_metric in table_df.columns and chosen_metric != "Temp_Category":
-            table_df = table_df.sort_values(chosen_metric, ascending=False)
-
-        st.dataframe(table_df, use_container_width=True, height=620)
+        fig.update_layout(height=640, dragmode=False, uirevision="fixed_map")
+        fig.update_geos(
+            showcountries=True,
+            countrycolor="rgba(255,255,255,0.25)",
+            showcoastlines=False,
+            showframe=False,
+            bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(plotly_dark(fig), use_container_width=True, config={"displayModeBar": False})
+    else:
+        why = []
+        if not pycountry_ok:
+            why.append("• `pycountry` is not installed (needed for ISO3 mapping).")
+        if total == 0:
+            why.append("• No country rows found for the selected year.")
+        if unmapped_ratio > 0.20:
+            why.append(f"• Too many unmapped countries: {unmapped}/{total} (~{unmapped_ratio*100:.1f}%).")
+        st.warning("Map is disabled to avoid incorrect hover labels.\n\n" + "\n".join(why))
 
     st.write("")
-    if not map_ok:
-        with st.expander("Show unmapped countries list"):
-            bad = grouped[grouped["ISO3"].isna()][country_col].astype(str).sort_values().unique().tolist()
-            st.write(bad)
+    st.markdown('<div class="glass"><h3>Country Summary Table</h3></div>', unsafe_allow_html=True)
+    st.write("")
 
-    st.info(f"Selected country (sidebar): **{st.session_state.selected_country}**")
+    show_cols = [country_col]
+    for c in ["Temp_Category", "Avg_Temp", "total_ghg", "Food_Production_Tonnes", "Carbon_Intensity_Index"]:
+        if c in grouped.columns and c not in show_cols:
+            show_cols.append(c)
+
+    table_df = grouped[show_cols].copy()
+    if chosen_metric in table_df.columns and chosen_metric != "Temp_Category":
+        table_df = table_df.sort_values(chosen_metric, ascending=False)
+
+    def style_temp_category(val):
+        if str(val) == "Cold":
+            return "background-color: rgba(59,130,246,0.25);"
+        if str(val) == "Moderate":
+            return "background-color: rgba(34,197,94,0.20);"
+        if str(val) == "Hot":
+            return "background-color: rgba(249,115,22,0.20);"
+        return ""
+
+    styler = table_df.style
+    if "Temp_Category" in table_df.columns:
+        styler = styler.applymap(style_temp_category, subset=["Temp_Category"])
+
+    st.dataframe(styler, use_container_width=True, height=520)
 
 # ============================================================
-# TAB 2: Country Detail
+# TAB 2: Country Insights
 # ============================================================
 with tabs[1]:
-    st.markdown('<div class="glass"><h2>📈 Country Detail</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass"><h2>📈 Country Insights</h2></div>', unsafe_allow_html=True)
     st.write("")
 
     ctry = st.session_state.selected_country
     cdf = df[df[country_col] == ctry].copy().sort_values(year_col)
-
     if cdf.empty:
         st.warning("No rows for selected country.")
         st.stop()
 
     latest = cdf.dropna(subset=[year_col]).sort_values(year_col).tail(1).iloc[0]
+
     c_kpis = st.columns(4)
-    with c_kpis[0]:
-        st.metric("Country", ctry)
-    with c_kpis[1]:
-        st.metric("Temp Category", str(latest.get("Temp_Category", "N/A")))
-    with c_kpis[2]:
-        st.metric("Avg Temp (latest)", f"{float(latest['Avg_Temp']):.2f} °C" if "Avg_Temp" in cdf.columns and pd.notna(latest.get("Avg_Temp")) else "N/A")
-    with c_kpis[3]:
-        st.metric("Food Production (latest)", f"{float(latest['Food_Production_Tonnes']):,.0f}" if "Food_Production_Tonnes" in cdf.columns and pd.notna(latest.get("Food_Production_Tonnes")) else "N/A")
+    c_kpis[0].metric("Selected country", ctry)
+    c_kpis[1].metric("Latest temperature category", str(latest.get("Temp_Category", "N/A")))
+    c_kpis[2].metric(
+        "Latest average temperature",
+        f"{float(latest['Avg_Temp']):.2f} °C" if "Avg_Temp" in cdf.columns and pd.notna(latest.get("Avg_Temp")) else "N/A"
+    )
+    c_kpis[3].metric(
+        "Latest food production",
+        f"{float(latest['Food_Production_Tonnes']):,.0f} tonnes" if "Food_Production_Tonnes" in df.columns and pd.notna(latest.get("Food_Production_Tonnes")) else "N/A"
+    )
 
     st.write("")
     left, right = st.columns([1.25, 1])
 
     with left:
-        st.markdown('<div class="glass"><h3>Climate & Emissions Trend</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass"><h3>Climate & Emissions over time</h3></div>', unsafe_allow_html=True)
         st.write("")
 
         if "Avg_Temp" in cdf.columns:
-            fig_temp = px.line(cdf, x=year_col, y="Avg_Temp", markers=True, title="Avg Temperature Over Time")
+            fig_temp = px.line(cdf, x=year_col, y="Avg_Temp", markers=True, title="Average Temperature")
             st.plotly_chart(plotly_dark(fig_temp), use_container_width=True)
 
         em_cols = [c for c in ["co2", "methane", "nitrous_oxide", "total_ghg"] if c in cdf.columns]
         if em_cols:
-            fig_em = px.line(cdf, x=year_col, y=em_cols, title="Emissions Over Time (multi-series)")
+            fig_em = px.line(cdf, x=year_col, y=em_cols, title="Emissions (multiple gases)")
             st.plotly_chart(plotly_dark(fig_em), use_container_width=True)
 
     with right:
-        st.markdown('<div class="glass"><h3>Production & Efficiency</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass"><h3>Production & efficiency</h3></div>', unsafe_allow_html=True)
         st.write("")
 
         if "Food_Production_Tonnes" in cdf.columns:
-            fig_prod = px.area(cdf, x=year_col, y="Food_Production_Tonnes", title="Food Production Over Time")
+            fig_prod = px.area(cdf, x=year_col, y="Food_Production_Tonnes", title="Food Production")
             st.plotly_chart(plotly_dark(fig_prod), use_container_width=True)
 
         if "Carbon_Intensity_Index" in cdf.columns:
-            fig_cii = px.line(cdf, x=year_col, y="Carbon_Intensity_Index", markers=True, title="Carbon Intensity Index Over Time")
+            fig_cii = px.line(cdf, x=year_col, y="Carbon_Intensity_Index", markers=True, title="Carbon Intensity Index")
             st.plotly_chart(plotly_dark(fig_cii), use_container_width=True)
 
     st.write("")
     s1, s2 = st.columns([1.1, 0.9])
 
     with s1:
-        st.markdown('<div class="glass"><h3>Scatter: GHG vs Production</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass"><h3>Relationship: emissions vs production</h3></div>', unsafe_allow_html=True)
         st.write("")
         if "total_ghg" in cdf.columns and "Food_Production_Tonnes" in cdf.columns:
             hover_cols = [year_col]
@@ -737,45 +620,43 @@ with tabs[1]:
                 color="Temp_Category" if "Temp_Category" in cdf.columns else None,
                 size="Avg_Temp" if "Avg_Temp" in cdf.columns else None,
                 hover_data=hover_cols,
-                title="GHG vs Food Production (per-year points)"
+                title="GHG vs Food Production (each point is a year)",
             )
             st.plotly_chart(plotly_dark(fig_scatter), use_container_width=True)
         else:
-            st.info("Need 'total_ghg' and 'Food_Production_Tonnes' columns for scatter plot.")
+            st.info("Need 'total_ghg' and 'Food_Production_Tonnes' columns for this chart.")
 
     with s2:
-        st.markdown('<div class="glass"><h3>Correlation Heatmap</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div class="glass"><h3>Correlation (quick check)</h3></div>', unsafe_allow_html=True)
         st.write("")
         keep = [c for c in ["Avg_Temp", "co2", "methane", "nitrous_oxide", "total_ghg", "Carbon_Intensity_Index", "Food_Production_Tonnes"] if c in cdf.columns]
         if len(keep) >= 3:
             corr = cdf[keep].corr(numeric_only=True)
             fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index, hoverongaps=False))
-            fig_corr.update_layout(title="Feature Correlations (Selected Country)")
+            fig_corr.update_layout(title="Correlation heatmap (selected country)")
             st.plotly_chart(plotly_dark(fig_corr), use_container_width=True)
         else:
             st.info("Not enough numeric columns for correlation view.")
 
 # ============================================================
-# TAB 3: Prediction (Actual vs Predicted + Growth %)
+# TAB 3: Forecast & Change
 # ============================================================
 with tabs[2]:
-    st.markdown('<div class="glass"><h2>🤖 Prediction (Actual vs Predicted + Growth)</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass"><h2>📊 Forecast & Change</h2></div>', unsafe_allow_html=True)
     st.write("")
 
-    # Load features
-    if not FEATS_PATH.exists():
-        st.error("❌ model_features.json not found in models/")
+    if not FOOD_FEATS_PATH.exists():
+        st.error(f"❌ Missing {FOOD_FEATS_PATH} (model_features.json)")
         st.stop()
-    feats = json.loads(FEATS_PATH.read_text())
+    food_feats = json.loads(FOOD_FEATS_PATH.read_text())
 
-    # Prefer trained model (if any), else load saved model
-    model = st.session_state.trained_model
-    if model is None:
-        if not MODEL_PATH.exists():
-            st.error("❌ best_food_model.pkl not found in models/")
+    food_model = st.session_state.trained_food_model
+    if food_model is None:
+        if not FOOD_MODEL_PATH.exists():
+            st.error(f"❌ Missing {FOOD_MODEL_PATH} (best_food_model.pkl)")
             st.stop()
-        model = safe_load_model(MODEL_PATH)
-    if model is None:
+        food_model = safe_load_model(FOOD_MODEL_PATH, "Food production model")
+    if food_model is None:
         st.stop()
 
     target_col = "Food_Production_Tonnes"
@@ -783,251 +664,344 @@ with tabs[2]:
         st.error("❌ Dataset missing target column 'Food_Production_Tonnes'.")
         st.stop()
 
-    missing_feats = [f for f in feats if f not in df.columns]
+    missing_feats = [f for f in food_feats if f not in df.columns]
     if missing_feats:
-        st.error(f"❌ Dataset missing model feature columns: {missing_feats}")
+        st.error(f"❌ Dataset missing required feature columns: {missing_feats}")
         st.stop()
 
     ctry = st.session_state.selected_country
-    cdf = df[df[country_col] == ctry].copy().sort_values(year_col)
-    cdf = cdf.dropna(subset=[year_col])
+    cdf = df[df[country_col] == ctry].copy().sort_values(year_col).dropna(subset=[year_col])
     if cdf.empty:
         st.warning("No rows for selected country.")
         st.stop()
 
     y_min = int(cdf[year_col].min())
     y_max = int(cdf[year_col].max())
-    yr_range = st.slider(
-        "Year range (historical comparison)",
-        min_value=y_min,
-        max_value=y_max,
-        value=(y_min, y_max)
-    )
 
+    yr_range = st.slider("Choose historical years for comparison", min_value=y_min, max_value=y_max, value=(y_min, y_max))
     cdf_range = cdf[(cdf[year_col] >= yr_range[0]) & (cdf[year_col] <= yr_range[1])].copy()
 
-    X_hist = cdf_range[feats].copy()
+    X_hist = cdf_range[food_feats].copy()
     y_true = cdf_range[target_col].copy()
-
     valid_mask = np.isfinite(X_hist.to_numpy()).all(axis=1) & np.isfinite(y_true.to_numpy())
     cdf_hist = cdf_range.loc[valid_mask].copy()
 
     if cdf_hist.empty:
-        st.warning("No fully valid rows (features+target) for this year range.")
+        st.warning("No fully valid rows (features + target) for the selected range.")
         st.stop()
 
-    X_hist = cdf_hist[feats]
+    X_hist = cdf_hist[food_feats]
     y_true = cdf_hist[target_col]
-    y_pred = model.predict(X_hist)
+    y_pred = food_model.predict(X_hist)
 
     m = metrics_regression(y_true, y_pred)
     met_cols = st.columns(4)
-    met_cols[0].metric("MAE", f"{m['MAE']:,.2f}" if np.isfinite(m["MAE"]) else "N/A")
-    met_cols[1].metric("RMSE", f"{m['RMSE']:,.2f}" if np.isfinite(m["RMSE"]) else "N/A")
-    met_cols[2].metric("MAPE (%)", f"{m['MAPE_%']:.2f}%" if np.isfinite(m["MAPE_%"]) else "N/A")
-    met_cols[3].metric("R²", f"{m['R2']:.3f}" if np.isfinite(m["R2"]) else "N/A")
-
-    st.write("")
+    met_cols[0].metric("Average error (MAE)", f"{m['MAE']:,.2f}" if np.isfinite(m["MAE"]) else "N/A")
+    met_cols[1].metric("Typical error size (RMSE)", f"{m['RMSE']:,.2f}" if np.isfinite(m["RMSE"]) else "N/A")
+    met_cols[2].metric("Percentage error (MAPE)", f"{m['MAPE_%']:.2f}%" if np.isfinite(m["MAPE_%"]) else "N/A")
+    met_cols[3].metric("Fit score (R²)", f"{m['R2']:.3f}" if np.isfinite(m["R2"]) else "N/A")
 
     plot_df = pd.DataFrame({
         "Year": cdf_hist[year_col].astype(int).values,
-        "Actual": y_true.values.astype(float),
-        "Predicted": np.array(y_pred, dtype=float),
-    }).sort_values("Year").reset_index(drop=True)
+        "Actual production (tonnes)": y_true.values.astype(float),
+        "Model estimate (tonnes)": np.array(y_pred, dtype=float),
+    }).sort_values("Year")
 
-    # NEW: Growth % (YoY)
-    plot_df["Actual_Growth_%"] = safe_pct_change(plot_df["Actual"])
-    plot_df["Predicted_Growth_%"] = safe_pct_change(plot_df["Predicted"])
+    plot_df["Actual year-over-year change (%)"] = year_over_year_pct(plot_df["Actual production (tonnes)"])
+    plot_df["Estimated year-over-year change (%)"] = year_over_year_pct(plot_df["Model estimate (tonnes)"])
 
-    # Metrics for latest year in selected range
-    latest_row = plot_df.tail(1).iloc[0]
-    gcols = st.columns(2)
-    gcols[0].metric(
-        "Latest YoY Change (Actual)",
-        f"{latest_row['Actual_Growth_%']:.2f}%" if np.isfinite(latest_row["Actual_Growth_%"]) else "N/A"
-    )
-    gcols[1].metric(
-        "Latest YoY Change (Predicted)",
-        f"{latest_row['Predicted_Growth_%']:.2f}%" if np.isfinite(latest_row["Predicted_Growth_%"]) else "N/A"
-    )
+    latest_actual_yoy = plot_df["Actual year-over-year change (%)"].dropna().iloc[-1] if plot_df["Actual year-over-year change (%)"].dropna().shape[0] else np.nan
+    latest_pred_yoy = plot_df["Estimated year-over-year change (%)"].dropna().iloc[-1] if plot_df["Estimated year-over-year change (%)"].dropna().shape[0] else np.nan
+
+    yoy_cols = st.columns(2)
+    yoy_cols[0].metric("Latest year-over-year change (Actual)", f"{latest_actual_yoy:.2f}%" if np.isfinite(latest_actual_yoy) else "N/A")
+    yoy_cols[1].metric("Latest year-over-year change (Model estimate)", f"{latest_pred_yoy:.2f}%" if np.isfinite(latest_pred_yoy) else "N/A")
 
     st.write("")
-
     fig_ap = go.Figure()
-    fig_ap.add_trace(go.Scatter(
-        x=plot_df["Year"],
-        y=plot_df["Actual"],
-        mode="lines+markers",
-        name="Actual",
-        customdata=np.array(list(zip(plot_df["Actual_Growth_%"])), dtype=object),
-        hovertemplate="Year: %{x}<br>Actual: %{y:,.0f}<br>YoY: %{customdata[0]:.2f}%<extra></extra>"
-    ))
-    fig_ap.add_trace(go.Scatter(
-        x=plot_df["Year"],
-        y=plot_df["Predicted"],
-        mode="lines+markers",
-        name="Predicted",
-        customdata=np.array(list(zip(plot_df["Predicted_Growth_%"])), dtype=object),
-        hovertemplate="Year: %{x}<br>Predicted: %{y:,.0f}<br>YoY: %{customdata[0]:.2f}%<extra></extra>"
-    ))
+    fig_ap.add_trace(go.Scatter(x=plot_df["Year"], y=plot_df["Actual production (tonnes)"], mode="lines+markers", name="Actual"))
+    fig_ap.add_trace(go.Scatter(x=plot_df["Year"], y=plot_df["Model estimate (tonnes)"], mode="lines+markers", name="Model estimate"))
     fig_ap.update_layout(
-        title=f"Actual vs Predicted Food Production — {ctry} ({yr_range[0]}–{yr_range[1]})",
+        title=f"Food Production — Actual vs Model Estimate ({ctry})",
         xaxis_title="Year",
-        yaxis_title="Food_Production_Tonnes",
+        yaxis_title="Tonnes",
     )
-    st.plotly_chart(plotly_dark(fig_ap), use_container_width=True)
+    st.plotly_chart(plotly_dark(fig_ap), use_container_width=True, config={"displayModeBar": False})
 
     st.write("")
-
-    # Small table showing growth clearly
-    st.markdown('<div class="glass"><h3>Year-over-Year Growth Table</h3></div>', unsafe_allow_html=True)
-    show_growth = plot_df[["Year", "Actual", "Actual_Growth_%", "Predicted", "Predicted_Growth_%"]].copy()
-    st.dataframe(show_growth, use_container_width=True, height=260)
-
-    st.write("")
-
-    # Future Projection beyond dataset end year
-    st.markdown('<div class="glass"><h3>Future Projection (Scenario Preview)</h3></div>', unsafe_allow_html=True)
-    st.caption(
-        "Future years estimate input features using a simple trend per feature per country, then apply the model. "
-        "Use this as a scenario preview, not a guaranteed forecast."
-    )
+    st.markdown('<div class="glass"><h3>Projection (future estimate)</h3></div>', unsafe_allow_html=True)
+    st.caption("For years beyond the dataset, the dashboard estimates missing inputs using a simple trend per feature, then runs the same model.")
 
     future_end = st.slider("Project until year", min_value=int(y_max), max_value=2050, value=min(2030, 2050))
+    future_plot = None
     if future_end > y_max:
         future_years = list(range(int(y_max) + 1, int(future_end) + 1))
-        future_features = compute_forecast_features_by_trend(cdf, year_col, feats, future_years)
-
-        if future_features.empty:
-            st.info("Not enough data to build future projections.")
-        else:
-            future_pred = model.predict(future_features[feats])
+        future_features = compute_forecast_features_by_trend(cdf, year_col, food_feats, future_years)
+        if not future_features.empty:
+            future_pred = food_model.predict(future_features[food_feats])
             future_plot = pd.DataFrame({
                 "Year": future_features[year_col].astype(int),
-                "Projected": np.array(future_pred, dtype=float)
-            }).sort_values("Year").reset_index(drop=True)
-
-            # NEW: projected growth
-            future_plot["Projected_Growth_%"] = safe_pct_change(future_plot["Projected"])
+                "Projected production (tonnes)": np.array(future_pred, dtype=float),
+            }).sort_values("Year")
+            future_plot["Projected year-over-year change (%)"] = year_over_year_pct(future_plot["Projected production (tonnes)"])
 
             fig_f = go.Figure()
+            fig_f.add_trace(go.Scatter(x=plot_df["Year"], y=plot_df["Actual production (tonnes)"], mode="lines+markers", name="Actual (historical)"))
+            fig_f.add_trace(go.Scatter(x=plot_df["Year"], y=plot_df["Model estimate (tonnes)"], mode="lines+markers", name="Model estimate (historical)"))
             fig_f.add_trace(go.Scatter(
-                x=plot_df["Year"],
-                y=plot_df["Actual"],
-                mode="lines+markers",
-                name="Actual (historical)"
-            ))
-            fig_f.add_trace(go.Scatter(
-                x=plot_df["Year"],
-                y=plot_df["Predicted"],
-                mode="lines+markers",
-                name="Predicted (historical)"
-            ))
-            fig_f.add_trace(go.Scatter(
-                x=future_plot["Year"],
-                y=future_plot["Projected"],
-                mode="lines",
-                name=f"Projected ({future_plot['Year'].min()}–{future_plot['Year'].max()})",
-                line=dict(dash="dash"),
-                customdata=np.array(list(zip(future_plot["Projected_Growth_%"])), dtype=object),
-                hovertemplate="Year: %{x}<br>Projected: %{y:,.0f}<br>YoY: %{customdata[0]:.2f}%<extra></extra>"
+                x=future_plot["Year"], y=future_plot["Projected production (tonnes)"],
+                mode="lines", name=f"Projection ({future_plot['Year'].min()}–{future_plot['Year'].max()})",
+                line=dict(dash="dash")
             ))
             fig_f.update_layout(
-                title=f"Historical vs Projected Food Production — {ctry}",
+                title=f"Historical + Projection — Food Production ({ctry})",
                 xaxis_title="Year",
-                yaxis_title="Food_Production_Tonnes",
+                yaxis_title="Tonnes",
             )
-            st.plotly_chart(plotly_dark(fig_f), use_container_width=True)
+            st.plotly_chart(plotly_dark(fig_f), use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("Not enough data to build projections for this country.")
 
     st.write("")
-    st.markdown('<div class="glass"><h3>Residuals (Actual − Predicted)</h3></div>', unsafe_allow_html=True)
-    res = plot_df.copy()
-    res["Residual"] = res["Actual"] - res["Predicted"]
-    fig_res = px.bar(res, x="Year", y="Residual", title="Residuals by Year (Positive = under-predicted)")
-    st.plotly_chart(plotly_dark(fig_res), use_container_width=True)
+    st.markdown('<div class="glass"><h3>Model gap (Residuals)</h3></div>', unsafe_allow_html=True)
+    st.caption("Residual = Actual − Model estimate. Residuals are only shown for years where actual data exists.")
+
+    res = plot_df[["Year", "Actual production (tonnes)", "Model estimate (tonnes)"]].copy()
+    res["Residual (tonnes)"] = res["Actual production (tonnes)"] - res["Model estimate (tonnes)"]
+
+    fig_res = px.bar(res, x="Year", y="Residual (tonnes)", title="Residuals by Year (tonnes)")
+    st.plotly_chart(plotly_dark(fig_res), use_container_width=True, config={"displayModeBar": False})
+
+    with st.expander("Show change table (year-over-year %)"):
+        show = plot_df[["Year", "Actual year-over-year change (%)", "Estimated year-over-year change (%)"]].copy()
+        st.dataframe(show, use_container_width=True)
+
+        if future_plot is not None:
+            st.write("")
+            st.markdown("**Projection change (year-over-year %)**")
+            st.dataframe(future_plot[["Year", "Projected year-over-year change (%)"]], use_container_width=True)
 
 # ============================================================
-# TAB 4: Explainable AI (XAI)
-# - FIX: asset path resolution supports assets/ and assests/
-# - FIX: filenames exactly match what you showed
+# TAB 4: Explainability (XAI) — ONLY ONE IMAGE
 # ============================================================
 with tabs[3]:
-    st.markdown('<div class="glass"><h2>🧠 Explainable AI (XAI)</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass"><h2>🧠 Explainability (XAI)</h2></div>', unsafe_allow_html=True)
     st.write("")
 
     st.markdown(
         """
 <div class="glass" style="opacity:0.92;">
-<h3>Why XAI matters for GeoFoodSec</h3>
-This dashboard supports **decision-making**, so stakeholders must understand **why** a prediction changes.
-XAI helps validate that the model uses sensible signals (emissions, temperature, carbon intensity) and supports trust.
+<h3 style="margin-top:0;">What this XAI section explains</h3>
+This dashboard uses a trained model to estimate <b>Food Production (tonnes)</b> from climate and emissions features.
+Explainability helps answer:
+<ul>
+  <li><b>Which features matter most overall?</b></li>
+  <li><b>When a prediction goes up/down, which feature pushes it?</b></li>
+  <li><b>Why can two countries with similar emissions have different predicted production?</b> (Because other inputs differ.)</li>
+</ul>
+
+<b>Important:</b> Explainability shows <i>model behavior</i>, not direct causation.
+It tells us what the model learned from dataset patterns.
 </div>
         """,
         unsafe_allow_html=True
     )
     st.write("")
 
-    shap_file = "final_shap_beeswarm.png"
-    cluster_file = "cluster_visualization_final.png"
+    st.markdown('<div class="glass"><h3>Food production: feature impact summary (SHAP)</h3></div>', unsafe_allow_html=True)
+    st.write("")
 
-    shap_path = resolve_asset_path(shap_file)
-    cluster_path = resolve_asset_path(cluster_file)
+    fp_shap = find_asset("final_shap_beeswarm.png")
+    if fp_shap is not None:
+        st.image(str(fp_shap), use_container_width=True, caption=f"Loaded from: {fp_shap}")
 
-    st.markdown('<div class="glass"><h3>SHAP Beeswarm</h3></div>', unsafe_allow_html=True)
-    st.markdown(
-        """
+        st.markdown(
+            """
 <div class="glass" style="opacity:0.92;">
-- Features at the top have the strongest overall effect across samples.<br>
-- Points to the right increase predicted production; to the left decrease it.<br>
-- Color typically indicates whether feature values are high/low.
-</div>
-        """,
-        unsafe_allow_html=True
-    )
+<h3 style="margin-top:0;">How to read the SHAP beeswarm</h3>
 
-    if shap_path.exists():
-        st.image(str(shap_path), use_container_width=True, caption=shap_file)
+<b>1) Each dot = one country-year record.</b><br>
+The plot summarizes how each input feature influenced the model prediction.
+
+<br><br>
+<b>2) Left vs right = decreases vs increases prediction.</b><br>
+• Dots on the <b>right</b> push predicted food production <b>higher</b><br>
+• Dots on the <b>left</b> push predicted food production <b>lower</b>
+
+<br><br>
+<b>3) Color shows whether the feature value is high or low.</b><br>
+In most SHAP plots: <b>red = high</b>, <b>blue = low</b>.  
+So if a feature has many <b>red dots on the right</b>, high values tend to increase predicted production.
+
+<br><br>
+<b>4) Features are sorted by importance.</b><br>
+Top rows have the biggest average impact across the dataset.
+
+<br><br>
+<b>What you can write in your report (example interpretation):</b><br>
+• The model is most sensitive to the top 3–5 features shown.<br>
+• Production is influenced by a combination of climate conditions (e.g., temperature) and emissions-related indicators.<br>
+• Some features may have mixed effects (dots on both sides), meaning the effect changes by country/year context.
+</div>
+            """,
+            unsafe_allow_html=True
+        )
     else:
-        st.warning(f"Missing asset: {shap_file}. Put it in assets/ (or assests/).")
-
-    st.write("")
-    st.markdown('<div class="glass"><h3>Clustering Visualization</h3></div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-<div class="glass" style="opacity:0.92;">
-This view groups countries with similar climate/emissions/production patterns.
-It supports **segmentation** (e.g., identify country groups that behave similarly) and adds interpretability.
-</div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if cluster_path.exists():
-        st.image(str(cluster_path), use_container_width=True, caption=cluster_file)
-    else:
-        st.warning(f"Missing asset: {cluster_file}. Put it in assets/ (or assests/).")
+        st.warning(
+            "Missing image: final_shap_beeswarm.png\n\n"
+            f"Checked assets folder: {ASSETS}\n"
+            f"Assets exists: {ASSETS.exists()}"
+        )
 
 # ============================================================
-# TAB 5: Clustering Insight (image + summary file)
+# TAB 5: Model Tuning
 # ============================================================
 with tabs[4]:
+    st.markdown('<div class="glass"><h2>🛠️ Model Tuning</h2></div>', unsafe_allow_html=True)
+    st.write("")
+
+    st.markdown(
+        """
+<div class="glass" style="opacity:0.92;">
+Use this section only if you want to test a different Random Forest setup.
+You can always restore the <b>original baseline model</b> with one click.
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+    st.write("")
+
+    try:
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.model_selection import train_test_split
+    except Exception:
+        st.warning("Training requires scikit-learn installed. You can still use the saved baseline model.")
+        RandomForestRegressor = None  # type: ignore
+
+    top_actions = st.columns([1, 1, 1])
+    with top_actions[0]:
+        if st.button("✅ Restore baseline model (recommended)"):
+            st.session_state.trained_food_model = None
+            st.session_state.trained_food_feats = None
+            st.success("Baseline model restored. Forecasts will use models/best_food_model.pkl")
+
+    st.write("")
+    st.markdown('<div class="glass"><h3>Training controls (simple wording)</h3></div>', unsafe_allow_html=True)
+    st.write("")
+
+    if RandomForestRegressor is None:
+        st.stop()
+
+    trees = st.number_input("Model strength (number of decision trees)", min_value=50, max_value=1500, value=400, step=50)
+    depth = st.number_input("Model detail level (0 means no limit)", min_value=0, max_value=60, value=0, step=1)
+    smooth = st.number_input("Smoothing level (minimum samples per split endpoint)", min_value=1, max_value=50, value=12, step=1)
+
+    model_target = "Food_Production_Tonnes"
+    if model_target not in df.columns:
+        st.error("Missing Food_Production_Tonnes in dataset.")
+        st.stop()
+
+    if not FOOD_FEATS_PATH.exists():
+        st.error(f"Missing {FOOD_FEATS_PATH} in models/.")
+        st.stop()
+
+    train_feats = json.loads(FOOD_FEATS_PATH.read_text())
+    missing = [c for c in train_feats + [model_target] if c not in df.columns]
+    if missing:
+        st.error(f"Dataset missing columns required for training: {missing}")
+        st.stop()
+
+    train_df = df.dropna(subset=train_feats + [model_target]).copy()
+    if train_df.empty:
+        st.error("No usable rows for training (too many missing values).")
+        st.stop()
+
+    X = train_df[train_feats].astype(float)
+    y = train_df[model_target].astype(float)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.22, random_state=42)
+
+    train_stats = st.columns(3)
+    train_stats[0].metric("Training rows", f"{len(X_train):,}")
+    train_stats[1].metric("Testing rows", f"{len(X_test):,}")
+    train_stats[2].metric("Inputs used", f"{len(train_feats)}")
+
+    if st.button("🚀 Train tuned model"):
+        max_depth = None if int(depth) == 0 else int(depth)
+        rf = RandomForestRegressor(
+            n_estimators=int(trees),
+            max_depth=max_depth,
+            min_samples_leaf=int(smooth),
+            random_state=42,
+            n_jobs=-1
+        )
+        rf.fit(X_train, y_train)
+        preds = rf.predict(X_test)
+        mt = metrics_regression(y_test, preds)
+
+        st.session_state.trained_food_model = rf
+        st.session_state.trained_food_feats = train_feats
+
+        st.success("Tuned model trained and activated for forecasting.")
+        perf = st.columns(4)
+        perf[0].metric("MAE", f"{mt['MAE']:,.2f}")
+        perf[1].metric("RMSE", f"{mt['RMSE']:,.2f}")
+        perf[2].metric("MAPE", f"{mt['MAPE_%']:.2f}%")
+        perf[3].metric("R²", f"{mt['R2']:.3f}")
+
+# ============================================================
+# TAB 6: Clustering Insight
+# ============================================================
+with tabs[5]:
     st.markdown('<div class="glass"><h2>🧩 Clustering Insight</h2></div>', unsafe_allow_html=True)
     st.write("")
 
-    cluster_file = "cluster_visualization_final.png"
-    cluster_path = resolve_asset_path(cluster_file)
+    st.markdown(
+        """
+<div class="glass" style="opacity:0.92;">
+This section groups countries into <b>similar profiles</b> based on the features used in your clustering step
+(e.g., temperature + emissions + intensity). Clustering is useful because it lets you:
+<ul>
+  <li>Compare a country to its <b>closest peers</b> instead of comparing globally.</li>
+  <li>Spot <b>outliers</b>: countries that behave differently from their cluster.</li>
+  <li>Support policy discussion: “countries in this cluster share conditions, but outcomes differ.”</li>
+</ul>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+    st.write("")
 
-    if cluster_path.exists():
-        st.image(str(cluster_path), use_container_width=True, caption=cluster_file)
+    cluster_img = find_asset("cluster_visualization_final.png")
+    if cluster_img is not None:
+        st.image(str(cluster_img), use_container_width=True, caption=f"Loaded from: {cluster_img}")
     else:
-        st.warning(f"Missing: {cluster_file} (place it in assets/ or assests/)")
+        st.warning(
+            "Missing image: cluster_visualization_final.png\n\n"
+            f"Checked assets folder: {ASSETS}"
+        )
 
     st.write("")
-    st.markdown('<div class="glass"><h3>Cluster Summary</h3></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="glass" style="opacity:0.92;">
+<b>How to interpret the cluster plot:</b><br>
+• Points that are <b>closer</b> are more similar in the feature space used for clustering.<br>
+• Separate groups suggest distinct patterns (e.g., high-emission vs low-emission profiles).<br>
+• If you see a country isolated, it may have a unique climate/emissions signature.
+</div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.write("")
+    st.markdown('<div class="glass"><h3>Cluster summary table</h3></div>', unsafe_allow_html=True)
 
     cluster_summary_xlsx = DATA / "clustering_results_summary.xlsx"
     cluster_summary_csv = DATA / "clustering_results_summary.csv"
-    summary_path = cluster_summary_xlsx if cluster_summary_xlsx.exists() else (cluster_summary_csv if cluster_summary_csv.exists() else None)
+    summary_path = cluster_summary_xlsx if cluster_summary_xlsx.exists() else (
+        cluster_summary_csv if cluster_summary_csv.exists() else None
+    )
 
     if summary_path is None:
         st.info("No clustering summary file found in /data (optional).")
@@ -1037,168 +1011,3 @@ with tabs[4]:
             st.dataframe(csum, use_container_width=True)
         except Exception as e:
             st.warning(f"Could not load clustering summary: {e}")
-
-# ============================================================
-# TAB 6: Train / Retrain Model
-# - FIX: stakeholder-friendly labels instead of n_estimators/max_depth/min_samples_leaf
-# ============================================================
-with tabs[5]:
-    st.markdown('<div class="glass"><h2>🛠️ Train / Retrain Model</h2></div>', unsafe_allow_html=True)
-    st.write("")
-
-    st.markdown(
-        """
-<div class="glass">
-<h3>What this section does</h3>
-<p style="opacity:0.92;">
-Retrain a <b>Random Forest</b> model using the fused dataset.
-You control training/testing year ranges to respect time (avoid data leakage).
-After training, the Prediction tab will automatically use the new model.
-</p>
-</div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if not FEATS_PATH.exists():
-        st.error("❌ model_features.json not found in models/")
-        st.stop()
-    feats = json.loads(FEATS_PATH.read_text())
-
-    target_col = "Food_Production_Tonnes"
-    if target_col not in df.columns:
-        st.error("❌ Dataset missing target column 'Food_Production_Tonnes'.")
-        st.stop()
-
-    missing_feats = [f for f in feats if f not in df.columns]
-    if missing_feats:
-        st.error(f"❌ Dataset missing model feature columns: {missing_feats}")
-        st.stop()
-
-    global_min_year = int(df[year_col].dropna().min())
-    global_max_year = int(df[year_col].dropna().max())
-
-    st.write("")
-    st.markdown('<div class="glass"><h3>Year Split</h3></div>', unsafe_allow_html=True)
-
-    # Safe defaults
-    default_train_start = global_min_year
-    default_train_end = min(global_max_year, global_min_year + 10)
-    if default_train_start > default_train_end:
-        default_train_end = global_min_year
-
-    default_test_start = min(global_max_year, default_train_end + 1)
-    default_test_end = global_max_year
-    if default_test_start > default_test_end:
-        default_test_start = global_max_year
-        default_test_end = global_max_year
-
-    train_range = st.slider(
-        "Training years (learn patterns from)",
-        min_value=global_min_year,
-        max_value=global_max_year,
-        value=(int(default_train_start), int(default_train_end))
-    )
-    test_range = st.slider(
-        "Testing years (evaluate on)",
-        min_value=global_min_year,
-        max_value=global_max_year,
-        value=(int(default_test_start), int(default_test_end))
-    )
-
-    st.write("")
-    st.markdown('<div class="glass"><h3>Model Settings (Stakeholder-Friendly)</h3></div>', unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        n_estimators = st.number_input(
-            "Number of Trees (more trees = more stable, slower)",
-            min_value=50, max_value=2000, value=400, step=50
-        )
-    with c2:
-        max_depth = st.number_input(
-            "Tree Depth Limit (higher = more complex; 0 = unlimited)",
-            min_value=0, max_value=100, value=0, step=1
-        )
-    with c3:
-        min_samples_leaf = st.number_input(
-            "Minimum Data per Leaf (higher = smoother, less overfitting)",
-            min_value=1, max_value=50, value=1, step=1
-        )
-
-    train_df = df[(df[year_col] >= train_range[0]) & (df[year_col] <= train_range[1])].copy()
-    test_df = df[(df[year_col] >= test_range[0]) & (df[year_col] <= test_range[1])].copy()
-
-    needed_cols = feats + [target_col]
-    train_df = train_df.dropna(subset=needed_cols)
-    test_df = test_df.dropna(subset=needed_cols)
-
-    st.write("")
-    tcols = st.columns(3)
-    tcols[0].metric("Train rows", f"{len(train_df):,}")
-    tcols[1].metric("Test rows", f"{len(test_df):,}")
-    tcols[2].metric("Features", f"{len(feats):,}")
-
-    st.write("")
-    train_btn = st.button("🚀 Train Model", use_container_width=True)
-
-    if train_btn:
-        if len(train_df) < 50 or len(test_df) < 10:
-            st.error("Not enough rows to train/test reliably. Try widening your year ranges.")
-        else:
-            X_train = train_df[feats].to_numpy()
-            y_train = train_df[target_col].to_numpy(dtype=float)
-
-            X_test = test_df[feats].to_numpy()
-            y_test = test_df[target_col].to_numpy(dtype=float)
-
-            rf = RandomForestRegressor(
-                n_estimators=int(n_estimators),
-                max_depth=None if int(max_depth) == 0 else int(max_depth),
-                min_samples_leaf=int(min_samples_leaf),
-                random_state=42,
-                n_jobs=-1
-            )
-
-            rf.fit(X_train, y_train)
-
-            pred_test = rf.predict(X_test)
-            m = metrics_regression(y_test, pred_test)
-
-            st.session_state.trained_model = rf
-            st.session_state.trained_feats = feats
-
-            st.success("✅ Training complete. Prediction tab will now use this trained model.")
-
-            mc = st.columns(4)
-            mc[0].metric("MAE (test)", f"{m['MAE']:,.2f}" if np.isfinite(m["MAE"]) else "N/A")
-            mc[1].metric("RMSE (test)", f"{m['RMSE']:,.2f}" if np.isfinite(m["RMSE"]) else "N/A")
-            mc[2].metric("MAPE% (test)", f"{m['MAPE_%']:.2f}%" if np.isfinite(m["MAPE_%"]) else "N/A")
-            mc[3].metric("R² (test)", f"{m['R2']:.3f}" if np.isfinite(m["R2"]) else "N/A")
-
-            # Download trained model
-            buf = BytesIO()
-            joblib.dump(rf, buf)
-            buf.seek(0)
-
-            st.download_button(
-                "⬇️ Download trained model (.pkl)",
-                data=buf.getvalue(),
-                file_name="trained_food_model.pkl",
-                mime="application/octet-stream",
-                use_container_width=True
-            )
-
-    st.write("")
-    st.markdown(
-        """
-<div class="glass">
-<h3>Note</h3>
-<p style="opacity:0.92;">
-If your saved Colab model was trained with different library versions, you might see loading issues.
-For best reproducibility, pin versions in requirements.txt and keep feature columns consistent.
-</p>
-</div>
-        """,
-        unsafe_allow_html=True
-    )
