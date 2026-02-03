@@ -4,3 +4,8 @@ numpy
 scikit-learn
 plotly
 joblib
+streamlit-plotly-events
+pycountry
+streamlit-plotly-events
+shap
+matplotlib
