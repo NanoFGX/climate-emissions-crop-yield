@@ -1011,3 +1011,4 @@ This section groups countries into <b>similar profiles</b> based on the features
             st.dataframe(csum, use_container_width=True)
         except Exception as e:
             st.warning(f"Could not load clustering summary: {e}")
+
