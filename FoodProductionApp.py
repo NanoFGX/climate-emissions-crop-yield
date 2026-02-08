@@ -819,29 +819,33 @@ It tells us what the model learned from dataset patterns.
 <div class="glass" style="opacity:0.92;">
 <h3 style="margin-top:0;">How to read the SHAP beeswarm</h3>
 
-<b>1) Each dot = one country-year record.</b><br>
-The plot summarizes how each input feature influenced the model prediction.
+<b>1) Each dot represents one country–year observation.</b><br>
+The beeswarm summarizes how each feature contributed to the model’s food production prediction across all countries and years.
 
 <br><br>
-<b>2) Left vs right = decreases vs increases prediction.</b><br>
-• Dots on the <b>right</b> push predicted food production <b>higher</b><br>
-• Dots on the <b>left</b> push predicted food production <b>lower</b>
+<b>2) Left vs right shows the direction of impact.</b><br>
+• Dots on the <b>right</b> increase the predicted food production<br>
+• Dots on the <b>left</b> decrease the predicted food production
 
 <br><br>
-<b>3) Color shows whether the feature value is high or low.</b><br>
-In most SHAP plots: <b>red = high</b>, <b>blue = low</b>.  
-So if a feature has many <b>red dots on the right</b>, high values tend to increase predicted production.
+<b>3) Color indicates feature magnitude.</b><br>
+In SHAP plots, <b>red dots represent high feature values</b> and <b>blue dots represent low values</b>.<br>
+When red points appear mostly on the right, high values of that feature tend to raise the prediction.
 
 <br><br>
-<b>4) Features are sorted by importance.</b><br>
-Top rows have the biggest average impact across the dataset.
+<b>4) Features are ordered by overall importance.</b><br>
+Features at the top have the largest average impact on the model output, while those lower down contribute smaller adjustments.
 
 <br><br>
-<b>What you can write in your report (example interpretation):</b><br>
-• The model is most sensitive to the top 3–5 features shown.<br>
-• Production is influenced by a combination of climate conditions (e.g., temperature) and emissions-related indicators.<br>
-• Some features may have mixed effects (dots on both sides), meaning the effect changes by country/year context.
+<b>Interpretation for this model:</b><br>
+• <b>Food_Prod_Lag1 is the most influential feature</b>, indicating that the model relies strongly on historical food production trends to make current predictions.<br>
+• <b>Carbon Intensity Index has a moderate secondary influence</b>, acting as a fine-tuning factor rather than a primary driver.<br>
+• <b>Emissions variables</b> (total GHG, methane, nitrous oxide, and CO₂) generally contribute small positive or negative adjustments near zero impact.<br>
+• <b>Average temperature has the weakest effect</b>, suggesting that temperature alone rarely shifts predictions significantly in this model.<br>
+• Overall, the model is <b>trend-driven rather than climate-dominant</b>, with climate and emissions features providing supporting context rather than primary control.
+
 </div>
+
             """,
             unsafe_allow_html=True
         )
