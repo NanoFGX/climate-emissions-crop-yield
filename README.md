@@ -29,12 +29,6 @@ It provides global visualization, country-level insights, forecasting, model exp
 **Model Tuning**
 - Train a new Random Forest configuration from inside the app
 - Restore baseline model anytime
-
-**Clustering Insight**
-- Cluster visualization image
-- Cluster summary table (optional file)
-- Interpretation notes for peer-group comparisons
-
 ---
 
 ## Project Structure (Required)
