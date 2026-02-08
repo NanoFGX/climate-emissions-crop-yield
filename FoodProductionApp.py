@@ -761,6 +761,54 @@ with tabs[2]:
         else:
             st.info("Not enough data to build projections for this country.")
 
+    # ============================================================
+    # ✅ ADDITION: Food Security Classification (Forecast-based)
+    # Place here: AFTER the projection plot, BEFORE residuals
+    # ============================================================
+    st.write("")
+    st.markdown('<div class="glass"><h3>🍽️ Food Security Classification (Forecast-based)</h3></div>', unsafe_allow_html=True)
+
+    if future_plot is not None and not future_plot.empty:
+        # Baseline = mean historical production (selected range)
+        baseline = float(plot_df["Actual production (tonnes)"].mean())
+
+        latest_proj = float(future_plot.iloc[-1]["Projected production (tonnes)"])
+        pct_change = (latest_proj - baseline) / baseline * 100 if baseline > 0 else np.nan
+
+        # Thresholds (defined here)
+        if np.isfinite(pct_change) and pct_change >= 5:
+            status = "🟢 Food Secure"
+            explanation = "Projected production is clearly above the historical average, indicating improved availability."
+        elif np.isfinite(pct_change) and pct_change <= -5:
+            status = "🔴 High Risk"
+            explanation = "Projected production shows a notable decline relative to historical levels, suggesting increased vulnerability."
+        else:
+            status = "🟡 Moderate Risk"
+            explanation = "Projected production is close to the historical average, meaning conditions are stable but still sensitive to shocks."
+
+        sec_cols = st.columns(3)
+        sec_cols[0].metric("Baseline production (historical avg)", f"{baseline:,.0f} tonnes")
+        sec_cols[1].metric("Latest projected production", f"{latest_proj:,.0f} tonnes")
+        sec_cols[2].metric("Change vs baseline", f"{pct_change:.2f}%" if np.isfinite(pct_change) else "N/A")
+
+        st.markdown(
+            f"""
+<div class="glass" style="opacity:0.92;">
+<b>Food security status:</b> {status}<br><br>
+<b>Interpretation:</b><br>
+{explanation}<br><br>
+<b>Threshold rule:</b><br>
+• ≥ +5% vs baseline → Food Secure<br>
+• between −5% and +5% → Moderate Risk<br>
+• ≤ −5% vs baseline → High Risk<br><br>
+<b>Note:</b> This is a relative, forecast-based classification (not direct causation). It allows fair comparison across countries with different production scales.
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("Food security classification appears when future projections are available (select a future year beyond the dataset).")
+
     st.write("")
     st.markdown('<div class="glass"><h3>Model gap (Residuals)</h3></div>', unsafe_allow_html=True)
     st.caption("Residual = Actual − Model estimate. Residuals are only shown for years where actual data exists.")
@@ -843,9 +891,7 @@ Features at the top have the largest average impact on the model output, while t
 • <b>Emissions variables</b> (total GHG, methane, nitrous oxide, and CO₂) generally contribute small positive or negative adjustments near zero impact.<br>
 • <b>Average temperature has the weakest effect</b>, suggesting that temperature alone rarely shifts predictions significantly in this model.<br>
 • Overall, the model is <b>trend-driven rather than climate-dominant</b>, with climate and emissions features providing supporting context rather than primary control.
-
 </div>
-
             """,
             unsafe_allow_html=True
         )
