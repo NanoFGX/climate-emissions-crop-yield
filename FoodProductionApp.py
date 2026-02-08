@@ -390,9 +390,9 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("What this tool answers"):
     st.markdown(
         """
-- **Food production forecasting:** estimated tonnes by country  
-- **Drivers:** temperature + emissions + carbon intensity  
-- **Insights:** clustering-based peer groups for comparison  
+- **Food production forecasting:** predicts production (tonnes) by country and year  
+- **Key drivers explored:** climate (temperature), emissions, and carbon intensity  
+- **Decision support:** highlights trends, projections, and forecast-based food security status  
         """
     )
 
@@ -997,3 +997,4 @@ You can always restore the <b>original baseline model</b> with one click.
         perf[1].metric("RMSE", f"{mt['RMSE']:,.2f}")
         perf[2].metric("MAPE", f"{mt['MAPE_%']:.2f}%")
         perf[3].metric("R²", f"{mt['R2']:.3f}")
+
