@@ -420,7 +420,7 @@ with kpi_cols[3]:
 st.write("")
 
 # ============================================================
-# Tabs (✅ Risk module removed)
+# Tabs (✅ Clustering Insight removed)
 # ============================================================
 tabs = st.tabs([
     "🌐 Global Overview",
@@ -428,7 +428,6 @@ tabs = st.tabs([
     "📊 Forecast & Change",
     "🧠 Explainability (XAI)",
     "🛠️ Model Tuning",
-    "🧩 Clustering Insight",
 ])
 
 # ============================================================
@@ -948,67 +947,3 @@ You can always restore the <b>original baseline model</b> with one click.
         perf[1].metric("RMSE", f"{mt['RMSE']:,.2f}")
         perf[2].metric("MAPE", f"{mt['MAPE_%']:.2f}%")
         perf[3].metric("R²", f"{mt['R2']:.3f}")
-
-# ============================================================
-# TAB 6: Clustering Insight
-# ============================================================
-with tabs[5]:
-    st.markdown('<div class="glass"><h2>🧩 Clustering Insight</h2></div>', unsafe_allow_html=True)
-    st.write("")
-
-    st.markdown(
-        """
-<div class="glass" style="opacity:0.92;">
-This section groups countries into <b>similar profiles</b> based on the features used in your clustering step
-(e.g., temperature + emissions + intensity). Clustering is useful because it lets you:
-<ul>
-  <li>Compare a country to its <b>closest peers</b> instead of comparing globally.</li>
-  <li>Spot <b>outliers</b>: countries that behave differently from their cluster.</li>
-  <li>Support policy discussion: “countries in this cluster share conditions, but outcomes differ.”</li>
-</ul>
-</div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.write("")
-
-    cluster_img = find_asset("cluster_visualization_final.png")
-    if cluster_img is not None:
-        st.image(str(cluster_img), use_container_width=True, caption=f"Loaded from: {cluster_img}")
-    else:
-        st.warning(
-            "Missing image: cluster_visualization_final.png\n\n"
-            f"Checked assets folder: {ASSETS}"
-        )
-
-    st.write("")
-    st.markdown(
-        """
-<div class="glass" style="opacity:0.92;">
-<b>How to interpret the cluster plot:</b><br>
-• Points that are <b>closer</b> are more similar in the feature space used for clustering.<br>
-• Separate groups suggest distinct patterns (e.g., high-emission vs low-emission profiles).<br>
-• If you see a country isolated, it may have a unique climate/emissions signature.
-</div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.write("")
-    st.markdown('<div class="glass"><h3>Cluster summary table</h3></div>', unsafe_allow_html=True)
-
-    cluster_summary_xlsx = DATA / "clustering_results_summary.xlsx"
-    cluster_summary_csv = DATA / "clustering_results_summary.csv"
-    summary_path = cluster_summary_xlsx if cluster_summary_xlsx.exists() else (
-        cluster_summary_csv if cluster_summary_csv.exists() else None
-    )
-
-    if summary_path is None:
-        st.info("No clustering summary file found in /data (optional).")
-    else:
-        try:
-            csum = load_file(summary_path)
-            st.dataframe(csum, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Could not load clustering summary: {e}")
-
